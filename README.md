@@ -17,6 +17,13 @@ wa-gateway (Pi 5) ──────┤                                       �
 
 Routing is by bearer token, exactly as whapi does it. Each bot sends its own token and reaches its own number — which is why adding a second number is a config change on both sides and **no code change on either**.
 
+Numbers are added, paired and removed from a web console at the deployment's root URL, without a redeploy. The gateway's own API sits under `/api` on the same host.
+
+```
+https://wa-gateway-coolify.bogdanripa.com/       management console (static)
+https://wa-gateway-coolify.bogdanripa.com/api    the gateway  ← bots point here
+```
+
 ---
 
 ## Why it's a separate service
@@ -25,7 +32,7 @@ gepetel is a stateless Cloud Function because whapi held the session for it. Bai
 
 Three consequences worth internalising before you deploy:
 
-1. **Exactly one instance.** Two gateway instances on the same credentials fight over each device slot, and WhatsApp resolves that by logging you out. The gateway detects it (`connectionReplaced`) and deliberately *stops* that session rather than reconnecting into a flap war. Two sessions sharing an `_ID` would cause the same thing, so the config refuses to start on duplicates.
+1. **Exactly one instance.** Two gateway instances on the same credentials fight over each device slot, and WhatsApp resolves that by logging you out. The gateway detects it (`connectionReplaced`) and deliberately *stops* that session rather than reconnecting into a flap war. Two sessions sharing an id would cause the same thing, so ids are unique by construction (they're the primary key) and tokens carry a unique index.
 2. **Auth state lives in Mongo, not on disk.** Pironman replaces the container on every redeploy. Baileys' bundled `useMultiFileAuthState` writes files, so with it you'd re-scan every QR after each deploy — and the Baileys docs say outright not to use it in production.
 3. **Media has to be re-hosted.** whapi handed the bots plain HTTPS links. Baileys hands you encrypted blobs. The gateway downloads, decrypts and serves them from its own public URL, which is what the bots and OpenAI fetch.
 
@@ -33,20 +40,22 @@ Three consequences worth internalising before you deploy:
 
 ## Deploying on Pironman
 
+The app is one Pironman app of kind **both**: a container serving `/api/*`, and a static bundle — the management console — serving everything else. That split isn't a preference; Pironman routes only `/api/*` to a container, and the rest is answered by the bundle without the container ever seeing it.
+
 ```bash
-apps_create id=wa-gateway image=<your-registry>/wa-gateway:latest
+apps_create id=wa-gateway health_path=/api/health
 
 apps_env_set id=wa-gateway \
   WA_MONGO_URL=...  WA_MONGO_DB=wa_gateway \
   WA_PUBLIC_URL=https://wa-gateway-coolify.bogdanripa.com \
-  WA_ADMIN_PASSWORD=<generate one> \
-  WA_SESSION_1_ID=gepetel \
-  WA_SESSION_1_TOKEN=<generate one> \
-  WA_SESSION_1_WEBHOOK_URL=https://<cloud-function-host>/whapi
+  WA_MANAGEMENT_KEY=<openssl rand -base64 32>
 
-apps_deploy_workflow id=wa-gateway
+apps_deploy_workflow id=wa-gateway     # ships the container
+apps_frontend_write id=wa-gateway      # ships frontend/ as the console
 apps_logs id=wa-gateway
 ```
+
+`health_path` matters: `/` is answered by the static bundle with no container in the path, so a healthcheck pointed there would pass with the gateway dead.
 
 Build for the Pi's architecture. Building on the Pi itself is simplest; from x64 or CI you must cross-build:
 
@@ -54,36 +63,37 @@ Build for the Pi's architecture. Building on the Pi itself is simplest; from x64
 docker buildx build --platform linux/arm64 -t <registry>/wa-gateway:latest --push .
 ```
 
-### Adding a second number
+### Adding a number
 
-```bash
-apps_env_set id=wa-gateway \
-  WA_SESSION_2_ID=second-bot \
-  WA_SESSION_2_TOKEN=<generate one> \
-  WA_SESSION_2_WEBHOOK_URL=https://<other-bot-host>/whapi
-apps_deploy_workflow id=wa-gateway
-```
+Open the console at `https://wa-gateway-coolify.bogdanripa.com/`, enter the management key, and fill in **Add a number**: an id, and the bot's own `/whapi` webhook URL. A token is generated and shown once — set the bot's `WHAPI_TOKEN` to it — and a pairing QR appears on the new card straight away.
 
-Then pair it at `/admin` and set that bot's `WHAPI_TOKEN` to the new token. Budget roughly 40–80 MB of RAM per number, depending on how many groups it's in.
+No redeploy, no environment variable, no restart. Budget roughly 40–80 MB of RAM per number, depending on how many groups it's in.
 
-`_ID` namespaces every stored document for that number — **never change it on a live session** or you orphan its credentials and it'll ask to pair again.
+The id namespaces every stored document for that number, so it can't be edited after creation — changing it would orphan the credentials. Everything else (webhook URL, pairing phone, rate cap) is editable in place, and changing them doesn't disturb the WhatsApp connection.
 
 ### Pairing
 
-Open `https://wa-gateway-coolify.bogdanripa.com/admin` (any username, `WA_ADMIN_PASSWORD` as the password). Each number gets its own card with its own QR: scan with **WhatsApp → Settings → Linked devices → Link a device**.
+Each number's card shows its own QR: scan with **WhatsApp → Settings → Linked devices → Link a device**. The console re-polls fast enough to keep up with WhatsApp rotating the code.
 
-If scanning a screen is awkward, set `WA_SESSION_<n>_PAIR_PHONE` to that number (digits only, with country code) and the card shows an 8-character code for **Link with phone number** instead.
+If scanning a screen is awkward, set that number's **pairing phone** (digits, with country code) and the card shows an 8-character code for **Link with phone number** instead.
 
-`/health` is **200 only when every configured number is connected**, so one unpaired number can't hide behind a green light.
+The console is also where you recover a number: **Restart** bounces a stuck socket, **Unlink & re-pair** wipes its credentials and shows a fresh QR, **Rotate token** issues a new bot credential, and **Delete** removes the number and purges everything stored for it.
+
+### Health
+
+- **`/api/health`** — liveness. 200 whenever the process is up, *including with zero numbers configured*, because Pironman gates deploys on it: a readiness check here would mean a fresh deployment could never go healthy long enough for anyone to add the first number. Counts only, no identifying detail — it is unauthenticated.
+- **`/api/ready`** — readiness. 503 until every configured number is connected, so one unpaired number can't hide behind a green light. This is the one to watch.
 
 ### Switching a bot over
 
 Apply `gepetel-wa-gateway.patch` (8 changed lines — it swaps the hardcoded whapi host for a `WHAPI_BASE_URL` env var that defaults to whapi.cloud), then in GCP Secret Manager:
 
 ```
-WHAPI_BASE_URL = https://wa-gateway-coolify.bogdanripa.com
-WHAPI_TOKEN    = <that session's WA_SESSION_n_TOKEN>
+WHAPI_BASE_URL = https://wa-gateway-coolify.bogdanripa.com/api
+WHAPI_TOKEN    = <the token the console showed for that number>
 ```
+
+Note the `/api`. Every path *below* the base URL is byte-identical to whapi's, which is the part gepetel hardcodes; the base itself was already a variable, so this is a config value and not a code change.
 
 `WHAPI_TOKEN` keeps its name and is still sent as `Authorization: Bearer …`; it's just the gateway's token now, and it's what selects the number. **Rolling back is unsetting `WHAPI_BASE_URL`.** Keep the whapi channel alive for a week so that's a real option.
 
@@ -91,7 +101,7 @@ WHAPI_TOKEN    = <that session's WA_SESSION_n_TOKEN>
 
 ## What's implemented
 
-Exactly gepetel's whapi surface, nothing more:
+Exactly gepetel's whapi surface, nothing more. Paths are relative to `WHAPI_BASE_URL`, which is `https://<host>/api`:
 
 | Endpoint | Used by the bot for |
 |---|---|
@@ -105,7 +115,19 @@ Exactly gepetel's whapi surface, nothing more:
 
 Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, link preview), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies).
 
-Plus gateway-only: `GET /health`, `GET /admin`, `POST /admin/:id/logout`, `GET /media/:id`.
+Plus gateway-only: `GET /api/health`, `GET /api/ready`, `GET /api/media/:id`.
+
+And the management API behind the console, all of it requiring `Authorization: Bearer <WA_MANAGEMENT_KEY>`:
+
+| Endpoint | |
+|---|---|
+| `GET /api/mgmt/numbers` | every number, with status, QR and token |
+| `POST /api/mgmt/numbers` | add one; returns its generated token |
+| `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap |
+| `POST /api/mgmt/numbers/:id/rotate-token` | issue a new bot token, revoking the old |
+| `POST /api/mgmt/numbers/:id/relink` | unlink from WhatsApp and show a fresh QR |
+| `POST /api/mgmt/numbers/:id/restart` | bounce the socket, keeping credentials |
+| `DELETE /api/mgmt/numbers/:id` | remove the number and purge its state |
 
 ---
 
@@ -130,20 +152,29 @@ Plus gateway-only: `GET /health`, `GET /admin`, `POST /admin/:id/logout`, `GET /
 ```bash
 npm run build
 npm test              # 28 unit tests — pure mappers
-node test/smoke.mjs   # 30 boot checks against a real mongod, two numbers
+npm run test:smoke    # 49 boot checks against a real mongod, two numbers
 ```
 
 The unit tests assert against **gepetel's actual branching logic**, transcribed from its `app.ts` into the test file, rather than against this code's own shape — so they fail if the payloads drift from what gepetel reads.
 
-The smoke test boots the real server process with two numbers configured and checks token routing, per-session credential isolation in Mongo, and that misconfigurations (duplicate id, duplicate token, bad id, missing webhook) refuse to start rather than half-working. Its QR check only passes when **both** numbers complete a live WebSocket handshake with WhatsApp.
+The smoke test boots the real server process with **no** numbers configured — a fresh deployment — then adds two through the management API and checks token routing, management-key enforcement, per-session credential isolation in Mongo, and that a deleted number takes its credentials with it while leaving the other's alone. It restarts the process to prove numbers added at runtime outlive the container, and boots several deliberately-broken configs to confirm they exit non-zero. Its QR check only passes when **both** numbers complete a live WebSocket handshake with WhatsApp.
+
+To work on the console without deploying:
+
+```bash
+npm run dev:console
+```
+
+That starts an in-memory mongod, the real gateway, and a local stand-in for Pironman's proxy on `http://127.0.0.1:8080` — static bundle at the root, `/api/*` forwarded to the container. Reproducing that split locally is the point: a path bug that only shows up under the real proxy is a slow one to find.
 
 ---
 
 ## Operating it
 
-- **`/health` is 503?** It tells you which number. Check `/admin` — either it needs pairing or it's mid-reconnect.
-- **A session shows `conflict`?** Another client is using those credentials. Check for a second gateway instance, then restart.
-- **A session shows `logged-out`?** That device was unlinked from the phone. Only that session's credentials are wiped; re-pair from its card on `/admin`.
+- **`/api/ready` is 503?** It tells you which number. Open the console — either it needs pairing or it's mid-reconnect.
+- **A session shows `conflict`?** Another client is using those credentials. Check for a second gateway instance, then hit **Restart** on its card.
+- **A session shows `logged-out`?** That device was unlinked from the phone. Only that session's credentials are wiped; use **Unlink & re-pair** on its card for a fresh QR.
+- **Lost a bot's token?** The console shows it — **Show token** on that number's card. If it leaked, **Rotate token** revokes it immediately, and the bot goes silent until its `WHAPI_TOKEN` is updated.
 - **`FAILED TO PERSIST CREDENTIALS` in the logs?** Fix it immediately — that session won't survive the next restart.
 - **Disk filling up?** Media is swept hourly against `WA_MEDIA_TTL_HOURS`, but a chatty month of images across several numbers adds up on a Pi.
 

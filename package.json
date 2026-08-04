@@ -11,7 +11,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsc --watch & nodemon dist/server.js",
-    "test": "node --test test/*.mjs"
+    "dev:console": "node dev/serve.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:smoke": "node test/smoke.mjs"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

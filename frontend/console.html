@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Console — wa-gateway</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!--
+  The management console.
+
+  Deliberately a plain static page: no framework, no build step, no bundled
+  dependencies. The platform serves any file in this bundle and sends everything
+  else to the container, so this page ships as-is and the API it calls is the
+  same origin — no CORS, and the key never crosses to a third party.
+
+  Unlike index.html and docs.html, this page is useless without the management
+  key. The page itself is public; everything it can *do* is gated by the API.
+-->
+
+<header>
+  <h1><a href="/">wa-gateway</a> <span class="crumb">console</span></h1>
+  <div class="head-right">
+    <span id="summary" class="muted"></span>
+    <a class="ghost btn" href="/docs.html">Docs</a>
+    <button id="lock" class="ghost" hidden>Lock</button>
+  </div>
+</header>
+
+<!-- Unlock ------------------------------------------------------------- -->
+<section id="unlock" hidden>
+  <h2>Management key</h2>
+  <p class="muted">
+    The key is kept in this browser's local storage, so you stay signed in on this
+    device until you lock the console.
+  </p>
+  <form id="unlock-form">
+    <input id="key" type="password" placeholder="Management key" autocomplete="current-password"
+           spellcheck="false" required>
+    <button type="submit">Unlock</button>
+  </form>
+  <p id="unlock-error" class="error" hidden></p>
+</section>
+
+<!-- Console ------------------------------------------------------------ -->
+<main id="console" hidden>
+
+  <section class="panel">
+    <h2>Bot configuration</h2>
+    <p class="muted">Every bot points at this base URL and sends its own number's token.</p>
+    <div class="kv">
+      <span class="k">WHAPI_BASE_URL</span>
+      <code id="api-base" class="v"></code>
+      <button class="ghost copy" data-copy="#api-base">Copy</button>
+    </div>
+  </section>
+
+  <div id="numbers"></div>
+
+  <section class="panel">
+    <h2>Add a number</h2>
+    <form id="add-form">
+      <label>
+        <span>Id</span>
+        <input name="id" placeholder="gepetel" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,31}" required>
+        <small>Namespaces this number's stored credentials. It can never be changed.</small>
+      </label>
+      <label>
+        <span>Webhook URL</span>
+        <input name="webhookUrl" type="url" placeholder="https://…/whapi" required>
+        <small>The bot's own <code>/whapi</code> endpoint. Inbound messages are POSTed here.</small>
+      </label>
+      <label>
+        <span>Pairing phone <span class="muted">(optional)</span></span>
+        <input name="pairPhone" inputmode="numeric" placeholder="40750271099">
+        <small>Digits with country code. Set it to pair with an 8-character code instead of a QR.</small>
+      </label>
+      <label>
+        <span>Send rate / minute <span class="muted">(optional)</span></span>
+        <input name="sendRatePerMinute" type="number" min="1" max="600" placeholder="default">
+        <small>Ceiling on outbound messages. Leave empty to use the gateway default.</small>
+      </label>
+      <button type="submit">Add number</button>
+    </form>
+    <p id="add-error" class="error" hidden></p>
+  </section>
+
+</main>
+
+<!-- Token reveal ------------------------------------------------------- -->
+<dialog id="token-dialog">
+  <h2>Token for <span id="token-for"></span></h2>
+  <p class="muted">
+    Set this as that bot's <code>WHAPI_TOKEN</code>. It selects which WhatsApp
+    number the bot reaches.
+  </p>
+  <code id="token-value" class="token"></code>
+  <div class="row">
+    <button class="ghost copy" data-copy="#token-value">Copy</button>
+    <button id="token-close">Done</button>
+  </div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

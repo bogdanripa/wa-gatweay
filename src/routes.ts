@@ -1,20 +1,28 @@
 import { createReadStream } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import QRCode from "qrcode";
-import { config } from "./config.js";
+import { API_PREFIX, config } from "./config.js";
 import { logger } from "./log.js";
 import type { Session } from "./session.js";
 import type { SessionManager } from "./sessions.js";
 import type { MediaStore } from "./media.js";
+import { NotFoundError, ValidationError, normaliseId } from "./sessionStore.js";
 import { toWaJid, toWhapiUserId } from "./jid.js";
 
 /**
  * whapi.cloud-compatible REST surface.
  *
  * Every route here mirrors one gepetel already calls in its whapi.ts, with the
- * same path, the same request body and the same response shape. That is the
- * entire migration strategy: point a bot's base URL at this service and its
- * WhatsApp code is unchanged.
+ * same path, the same request body and the same response shape — all relative to
+ * the base URL the bot is configured with. That is the entire migration
+ * strategy: point a bot's `WHAPI_BASE_URL` at this service and its WhatsApp code
+ * is unchanged.
+ *
+ * The base URL now carries an `/api` prefix, because Pironman proxies only
+ * `/api/*` to the container and answers everything else from the static bundle
+ * that serves the management console. The paths *below* the base are untouched,
+ * which is the part gepetel actually hardcodes.
  *
  * Multi-number works the same way whapi's does: the bearer token selects the
  * channel. A bot sends its own token and reaches its own number — so adding a
@@ -33,6 +41,27 @@ import { toWaJid, toWhapiUserId } from "./jid.js";
 /** The session resolved from the bearer token, attached by the auth middleware. */
 type ApiRequest = Request & { session?: Session };
 
+const bearerOf = (req: Request): string => {
+    const hdr = req.get("authorization") || "";
+    return hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
+};
+
+const fail = (res: Response, e: unknown, code = 500) => {
+    const message = e instanceof Error ? e.message : String(e);
+    // Rejected input is the caller's problem and shouldn't read as a gateway
+    // fault in the logs — or return a 5xx that makes a bot retry a bad request.
+    if (e instanceof ValidationError) {
+        res.status(400).json({ error: { message } });
+        return;
+    }
+    if (e instanceof NotFoundError) {
+        res.status(404).json({ error: { message } });
+        return;
+    }
+    logger.error({ e }, "api error");
+    res.status(code).json({ error: { message } });
+};
+
 export function makeApiRouter(manager: SessionManager): Router {
     const router = Router();
 
@@ -40,8 +69,7 @@ export function makeApiRouter(manager: SessionManager): Router {
     // path should 404, not 401. A 401 on an unknown route sends you hunting for a
     // credentials problem that isn't there.
     router.use(["/groups", "/messages", "/presences"], (req: ApiRequest, res: Response, next) => {
-        const hdr = req.get("authorization") || "";
-        const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
+        const token = bearerOf(req);
         const session = token ? manager.byTokenOrNull(token) : null;
         if (!session) {
             res.status(401).json({ error: { message: "unauthorized" } });
@@ -53,12 +81,6 @@ export function makeApiRouter(manager: SessionManager): Router {
 
     // Every handler below runs after the middleware, so the session is present.
     const sessionOf = (req: ApiRequest): Session => req.session!;
-
-    const fail = (res: Response, e: unknown, code = 500) => {
-        const message = e instanceof Error ? e.message : String(e);
-        logger.error({ e }, "api error");
-        res.status(code).json({ error: { message } });
-    };
 
     // --- groups -------------------------------------------------------------
 
@@ -186,15 +208,27 @@ export function makeApiRouter(manager: SessionManager): Router {
     return router;
 }
 
-/** Pairing UI + health. Separate from the API so it has its own auth. */
-export function makeAdminRouter(manager: SessionManager, media: MediaStore): Router {
+/** Health and media: the two things that must work without any credential. */
+export function makeGatewayRouter(manager: SessionManager, media: MediaStore): Router {
     const router = Router();
 
+    /**
+     * Liveness. Unauthenticated because Pironman's healthcheck and its deploy
+     * gate request it that way, which is also why it must be 200 with zero
+     * numbers configured — otherwise a fresh deployment could never go healthy
+     * long enough for anyone to open the console and add the first one.
+     *
+     * Counts only. This endpoint used to return every session's full state,
+     * pairing code included, to anyone on the internet.
+     */
     router.get("/health", (_req, res) => {
-        const h = manager.health();
-        // 200 only when every number can actually send. A partially-down gateway
-        // reporting green is how a number sits unpaired for a week unnoticed.
-        res.status(h.ok ? 200 : 503).json(h);
+        res.json(manager.health());
+    });
+
+    /** Readiness: 503 until every configured number can actually send. */
+    router.get("/ready", (_req, res) => {
+        const r = manager.ready();
+        res.status(r.ok ? 200 : 503).json(r);
     });
 
     // Media is served on an unguessable path rather than behind a bearer token:
@@ -217,93 +251,176 @@ export function makeAdminRouter(manager: SessionManager, media: MediaStore): Rou
         }
     });
 
-    const adminAuth = (req: Request, res: Response, next: () => void) => {
-        const hdr = req.get("authorization") || "";
-        if (hdr.startsWith("Basic ")) {
-            const pass = Buffer.from(hdr.slice(6), "base64").toString().split(":")[1] || "";
-            if (pass === config.adminPassword) return next();
-        }
-        res.set("WWW-Authenticate", 'Basic realm="wa-gateway"');
-        res.status(401).send("Authentication required");
-    };
+    return router;
+}
 
-    const esc = (s: unknown) =>
-        String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/**
+ * The management API behind the console.
+ *
+ * This is the most dangerous surface in the gateway: it adds WhatsApp numbers,
+ * reads every bot's token and can unlink an account. It is also, unavoidably, on
+ * the public internet — so the key is compared in constant time, repeated
+ * failures from one address are throttled, and nothing here is reachable with a
+ * session token (a compromised bot must not be able to enumerate the others).
+ */
+export function makeManagementRouter(manager: SessionManager): Router {
+    const router = Router();
 
-    /** One card per number: status, QR or pairing code, and an unlink button. */
-    async function renderSession(session: Session): Promise<string> {
-        const s = session.describe();
-        const badge =
-            s.status === "connected" ? "#16a34a" : s.status === "awaiting-pairing" ? "#d97706" : "#dc2626";
-
-        let pairing = "";
-        if (session.qr) {
-            const dataUrl = await QRCode.toDataURL(session.qr, { margin: 2, width: 280 });
-            pairing = `<p>Scan in WhatsApp → <b>Settings → Linked devices → Link a device</b>:</p>
-<img src="${dataUrl}" alt="pairing QR" width="280" height="280">
-<p class="hint">The code rotates every ~20s; reload if it expires.</p>`;
-        } else if (s.pairingCode) {
-            pairing = `<p>Enter in WhatsApp → <b>Linked devices → Link with phone number</b>:</p>
-<p class="code">${esc(s.pairingCode)}</p>`;
-        }
-
-        const conflict =
-            s.status === "conflict"
-                ? `<p class="err"><b>Another client is using these credentials.</b>
-Check for a second gateway instance or a duplicate session id, then restart.</p>`
-                : "";
-
-        return `<section>
- <h2>${esc(s.id)} <span class="s" style="background:${badge}">${esc(s.status)}</span></h2>
- ${conflict}
- ${pairing}
- <dl>
-  <dt>Account</dt><dd>${esc(s.me?.id || "—")}${s.me?.name ? ` (${esc(s.me.name)})` : ""}</dd>
-  <dt>Webhook</dt><dd>${esc(s.webhookUrl)}</dd>
-  <dt>Connected since</dt><dd>${s.connectedAt ? new Date(s.connectedAt).toISOString() : "—"}</dd>
-  <dt>Webhook backlog</dt><dd>${s.webhookBacklog}</dd>
-  <dt>Reconnect attempts</dt><dd>${s.reconnectAttempts}</dd>
-  <dt>Last error</dt><dd>${esc(s.lastError || "—")}</dd>
- </dl>
- <form method="POST" action="/admin/${encodeURIComponent(s.id)}/logout"
-       onsubmit="return confirm('Unlink ${esc(s.id)} and require a fresh pairing?')">
-  <button type="submit">Unlink &amp; re-pair ${esc(s.id)}</button>
- </form>
-</section>`;
+    // Fail closed when unconfigured. A gateway with no key must not be
+    // administrable by anyone — including by an empty bearer token, which is
+    // what a naive constant-time compare against "" would happily accept.
+    if (!config.managementKey) {
+        router.use((_req, res) => {
+            res.status(503).json({
+                error: {
+                    message:
+                        "the management API is not configured — set WA_MANAGEMENT_KEY and redeploy",
+                },
+            });
+        });
+        return router;
     }
 
-    router.get("/admin", adminAuth, async (_req, res) => {
-        const h = manager.health();
-        const cards = await Promise.all(manager.all().map(renderSession));
+    const expected = Buffer.from(config.managementKey);
 
-        res.type("html").send(`<!doctype html>
-<html><head><meta charset="utf-8"><title>wa-gateway</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
- body{font:15px/1.5 system-ui,sans-serif;max-width:680px;margin:2rem auto;padding:0 1rem;color:#111}
- section{border:1px solid #e4e4e7;border-radius:10px;padding:1rem 1.25rem;margin:1.25rem 0}
- h1{margin-bottom:.25rem} h2{margin:0 0 .75rem;font-size:1.1rem}
- .s{display:inline-block;padding:.15rem .55rem;border-radius:999px;color:#fff;font-size:12px;vertical-align:middle}
- dt{font-weight:600;margin-top:.5rem} dd{margin:0 0 0 1rem;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
- .code{font-size:1.9rem;letter-spacing:.25em;font-family:ui-monospace,monospace;background:#f4f4f5;padding:.5rem 1rem;border-radius:8px;display:inline-block}
- button{padding:.45rem .9rem;border:1px solid #dc2626;background:#fff;color:#dc2626;border-radius:6px;cursor:pointer}
- .hint{color:#666;font-size:13px} .err{color:#dc2626}
- .sum{color:#666}
-</style></head><body>
-<h1>wa-gateway</h1>
-<p class="sum">${h.connected} of ${h.total} number${h.total === 1 ? "" : "s"} connected</p>
-${cards.join("\n")}
-</body></html>`);
-    });
+    const keyMatches = (given: string): boolean => {
+        const buf = Buffer.from(given);
+        // timingSafeEqual throws on a length mismatch, and the lengths differing
+        // is itself the common case, so compare lengths first and accept that
+        // key *length* is observable. The bytes are not.
+        if (buf.length !== expected.length) return false;
+        return timingSafeEqual(buf, expected);
+    };
 
-    router.post("/admin/:id/logout", adminAuth, async (req, res) => {
-        const session = manager.byIdOrNull(req.params.id);
-        if (!session) {
-            res.status(404).send("no such session");
+    /**
+     * Failed-attempt throttle, per source address. Not a substitute for a strong
+     * key — it's what turns an online brute force from "slow" into "pointless"
+     * while the operator still notices the log lines.
+     */
+    const failures = new Map<string, { count: number; lastFailAt: number; until: number }>();
+    const LOCKOUT_AFTER = 10;
+    const LOCKOUT_MS = 15 * 60_000;
+    const MAX_TRACKED = 10_000;
+
+    router.use((req, res, next) => {
+        const who = req.ip || "unknown";
+        const now = Date.now();
+        const record = failures.get(who);
+
+        if (record && record.until > now) {
+            res.status(429).json({
+                error: { message: "too many failed attempts, try again later" },
+            });
             return;
         }
-        await session.logout();
-        res.redirect("/admin");
+
+        // A lockout that has expired, or a quiet 15 minutes, wipes the slate —
+        // otherwise one mistyped key would hold an operator out permanently.
+        if (record && now - record.lastFailAt > LOCKOUT_MS) failures.delete(who);
+
+        if (!keyMatches(bearerOf(req))) {
+            // Bound the map: an attacker rotating source addresses would
+            // otherwise turn this defence into a memory leak.
+            if (failures.size >= MAX_TRACKED) {
+                for (const [k, v] of failures) if (v.until <= now) failures.delete(k);
+            }
+            const count = (failures.get(who)?.count ?? 0) + 1;
+            failures.set(who, {
+                count,
+                lastFailAt: now,
+                until: count >= LOCKOUT_AFTER ? now + LOCKOUT_MS : 0,
+            });
+            logger.warn({ ip: who, count }, "management auth failed");
+            res.status(401).json({ error: { message: "unauthorized" } });
+            return;
+        }
+
+        failures.delete(who);
+        next();
+    });
+
+    /**
+     * One number, as the console renders it. The QR is turned into a data URL
+     * here rather than in the browser so the console needs no bundled library —
+     * it is a plain static page with no build step.
+     */
+    async function present(session: Session) {
+        const s = session.describeForManagement();
+        const { qr, ...rest } = s;
+        return {
+            ...rest,
+            qrDataUrl: qr ? await QRCode.toDataURL(qr, { margin: 2, width: 320 }) : undefined,
+        };
+    }
+
+    router.get("/numbers", async (_req, res) => {
+        try {
+            res.json({
+                numbers: await Promise.all(manager.all().map(present)),
+                defaults: { sendRatePerMinute: config.sendRatePerMinute },
+                // What to set as the bot's WHAPI_BASE_URL, shown in the console so
+                // nobody has to reconstruct the /api prefix from memory.
+                apiBaseUrl: `${config.publicUrl}${API_PREFIX}`,
+            });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/numbers", async (req, res) => {
+        try {
+            const doc = await manager.create(req.body || {});
+            const session = manager.byIdOrNull(doc._id);
+            res.status(201).json({ number: session ? await present(session) : doc });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.patch("/numbers/:id", async (req, res) => {
+        try {
+            await manager.update(normaliseId(req.params.id), req.body || {});
+            const session = manager.byIdOrNull(normaliseId(req.params.id));
+            res.json({ number: session ? await present(session) : null });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/numbers/:id/rotate-token", async (req, res) => {
+        try {
+            const doc = await manager.rotateToken(normaliseId(req.params.id));
+            res.json({ token: doc.token });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/numbers/:id/relink", async (req, res) => {
+        try {
+            await manager.relink(normaliseId(req.params.id));
+            res.json({ ok: true });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/numbers/:id/restart", async (req, res) => {
+        try {
+            await manager.restart(normaliseId(req.params.id));
+            res.json({ ok: true });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.delete("/numbers/:id", async (req, res) => {
+        try {
+            await manager.remove(normaliseId(req.params.id));
+            res.json({ ok: true });
+        } catch (e) {
+            fail(res, e);
+        }
     });
 
     return router;

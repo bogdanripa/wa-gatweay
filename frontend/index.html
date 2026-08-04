@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>wa-gateway — a self-hosted WhatsApp API for your bots</title>
+<meta name="description" content="A whapi.cloud-compatible WhatsApp gateway you run yourself. Host several numbers, keep your bot's code unchanged, and stop paying per channel.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="marketing">
+
+<header>
+  <h1>wa-gateway</h1>
+  <div class="head-right">
+    <a class="ghost btn" href="/docs.html">Docs</a>
+    <a class="btn primary" href="/console.html">Console</a>
+  </div>
+</header>
+
+<section class="hero">
+  <h2>A WhatsApp API you own.</h2>
+  <p class="lede">
+    wa-gateway holds the WhatsApp sessions for your bots and exposes them as a plain
+    HTTP API — the same endpoints, request bodies and webhook payloads whapi.cloud
+    speaks. Point an existing bot at it by changing one environment variable.
+  </p>
+  <div class="row">
+    <a class="btn primary" href="/console.html">Add a number</a>
+    <a class="btn ghost" href="/docs.html">Read the API docs</a>
+  </div>
+</section>
+
+<section>
+  <h2>Link a number in about a minute</h2>
+  <ol class="steps">
+    <li><strong>Open the console</strong> and enter your management key.</li>
+    <li><strong>Add a number</strong> — an id, and the webhook URL your bot listens on.</li>
+    <li><strong>Scan the QR</strong> with WhatsApp → Settings → Linked devices. Your number
+      now shows wa-gateway as a linked device, exactly like WhatsApp Web.</li>
+    <li><strong>Copy the token</strong> into your bot. That token is what selects this number.</li>
+  </ol>
+  <p class="muted">
+    Prefer not to scan a screen? Set a pairing phone on the number and the console
+    shows an 8-character code for <em>Link with phone number</em> instead.
+  </p>
+</section>
+
+<section>
+  <h2>What it does</h2>
+  <div class="grid">
+    <div>
+      <h3>Drop-in for whapi.cloud</h3>
+      <p class="muted">
+        Same paths, same bodies, same response shapes, same webhook events. Migrating an
+        existing bot is a base-URL change and a token swap — not a rewrite.
+      </p>
+    </div>
+    <div>
+      <h3>Many numbers, one service</h3>
+      <p class="muted">
+        Each number is its own session with its own token, webhook target, rate limit and
+        credentials. A bot sends its token and reaches its own number. Nothing is shared.
+      </p>
+    </div>
+    <div>
+      <h3>Send and receive</h3>
+      <p class="muted">
+        Text, images, native polls with live vote tallies, emoji reactions, read receipts
+        and typing indicators out. Text, images, GIFs, voice notes, audio and link
+        previews in — media downloaded, decrypted and re-hosted for you.
+      </p>
+    </div>
+    <div>
+      <h3>Groups that make sense</h3>
+      <p class="muted">
+        Authoritative rosters and subjects on demand, with participant identities resolved
+        back to real phone numbers rather than WhatsApp's newer opaque LIDs.
+      </p>
+    </div>
+    <div>
+      <h3>Ordered, retried delivery</h3>
+      <p class="muted">
+        Inbound events are delivered to your webhook one at a time, in order, and retried
+        on failure. Conversation threading doesn't get corrupted by a slow endpoint.
+      </p>
+    </div>
+    <div>
+      <h3>Survives redeploys</h3>
+      <p class="muted">
+        Session credentials live in the database, not the container filesystem. Ship a new
+        version and your numbers stay linked — no re-scanning anything.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="quiet">
+  <h2>Worth knowing</h2>
+  <p class="muted">
+    This drives WhatsApp through an unofficial client, which is against WhatsApp's terms
+    of service. It's built for running your own bot on your own number in your own
+    groups — the lowest-risk profile there is — and every number carries an outbound rate
+    cap so a bug can't turn into a ban. Don't point it at cold outreach.
+  </p>
+</section>
+
+<footer>
+  <a href="/docs.html">Docs</a> · <a href="/console.html">Console</a> ·
+  <a href="/api/health">Status</a>
+</footer>
+
+</body>
+</html>

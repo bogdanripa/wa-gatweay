@@ -60,7 +60,8 @@ class RateLimiter {
  */
 export class Session {
     readonly id: string;
-    readonly token: string;
+    /** Mutable: the console can rotate a bot's token without re-pairing the number. */
+    token: string;
 
     private sock?: WASocket;
     private saveCreds: () => Promise<void> = async () => {};
@@ -71,6 +72,8 @@ export class Session {
     private log;
     private reconnectAttempts = 0;
     private stopping = false;
+    /** Bumped per socket; stale sockets' events are ignored. See start(). */
+    private generation = 0;
 
     status: SessionStatus = "starting";
     /** Raw QR string, when one is pending. Rendered as an image by the admin page. */
@@ -93,10 +96,39 @@ export class Session {
         this.webhook = new WebhookSender(cfg.webhookUrl, cfg.token, cfg.id);
     }
 
+    /**
+     * Adopt an edited config without touching the socket.
+     *
+     * Changing a webhook URL or a rate cap has nothing to do with the WhatsApp
+     * connection, and tearing the socket down to apply one would cost a
+     * reconnect — and, often enough, a `connectionReplaced` flap. The id is not
+     * updatable at all: it namespaces the stored credentials, so changing it
+     * would orphan them.
+     */
+    applyConfig(cfg: SessionConfig) {
+        if (cfg.id !== this.id) throw new Error("a session's id cannot change");
+        this.cfg = cfg;
+        this.token = cfg.token;
+        this.limiter = new RateLimiter(cfg.sendRatePerMinute ?? config.sendRatePerMinute);
+        this.webhook.retarget(cfg.webhookUrl, cfg.token);
+    }
+
     // ---------------------------------------------------------------- lifecycle
 
     async start(): Promise<void> {
         this.stopping = false;
+        // Every socket this session has ever opened gets a number, and its event
+        // handlers only act while they are the current one.
+        //
+        // Without this, a socket torn down by `restart()` or `relink()` still
+        // emits its `close` a moment later, and that handler would schedule a
+        // reconnect on top of the socket that just replaced it. Two sockets on
+        // one set of credentials is exactly the `connectionReplaced` flap this
+        // gateway refuses to reconnect into — self-inflicted, and only from a
+        // console action, which is why it never came up before.
+        const gen = ++this.generation;
+        const current = () => gen === this.generation;
+
         const { state, saveCreds, clear } = await useMongoAuthState(this.stores, this.id);
         this.saveCreds = saveCreds;
         this.clearAuth = clear;
@@ -131,20 +163,40 @@ export class Session {
         // session dies at the next restart, and a silent failure means finding
         // that out days later with no idea why.
         this.sock.ev.on("creds.update", () => {
+            // Not gated on `current()`: a credential update in flight when a
+            // socket is replaced is still this number's credential update, and
+            // dropping one is how a session stops surviving restarts.
             void this.saveCreds().catch((e) =>
                 this.log.error({ e }, "FAILED TO PERSIST CREDENTIALS — session will not survive a restart")
             );
         });
-        this.sock.ev.on("connection.update", (u) => void this.onConnectionUpdate(u));
-        this.sock.ev.on("messages.upsert", (u) => void this.onMessages(u));
-        this.sock.ev.on("messages.update", (u) => void this.onMessageUpdates(u));
-        this.sock.ev.on("groups.upsert", (g) => void this.onGroups(g));
-        this.sock.ev.on("groups.update", (g) => void this.onGroupsUpdate(g));
-        this.sock.ev.on("group-participants.update", (u) => void this.onParticipants(u));
-        this.sock.ev.on("contacts.update", (c) => void this.onContacts(c));
+        this.sock.ev.on("connection.update", (u) => {
+            if (current()) void this.onConnectionUpdate(u, gen);
+        });
+        this.sock.ev.on("messages.upsert", (u) => {
+            if (current()) void this.onMessages(u);
+        });
+        this.sock.ev.on("messages.update", (u) => {
+            if (current()) void this.onMessageUpdates(u);
+        });
+        this.sock.ev.on("groups.upsert", (g) => {
+            if (current()) void this.onGroups(g);
+        });
+        this.sock.ev.on("groups.update", (g) => {
+            if (current()) void this.onGroupsUpdate(g);
+        });
+        this.sock.ev.on("group-participants.update", (u) => {
+            if (current()) void this.onParticipants(u);
+        });
+        this.sock.ev.on("contacts.update", (c) => {
+            if (current()) void this.onContacts(c);
+        });
     }
 
-    private async onConnectionUpdate(u: Partial<import("baileys").ConnectionState>) {
+    private async onConnectionUpdate(
+        u: Partial<import("baileys").ConnectionState>,
+        gen: number
+    ) {
         const { connection, lastDisconnect, qr } = u;
 
         if (qr) {
@@ -223,7 +275,9 @@ export class Session {
                     : Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempts, 5));
             this.log.warn({ code, delay, attempt: this.reconnectAttempts }, "connection closed, reconnecting");
             setTimeout(() => {
-                if (!this.stopping) {
+                // `gen` may have moved while we waited — a console restart, or an
+                // unlink. Whoever bumped it owns the socket now.
+                if (!this.stopping && gen === this.generation) {
                     void this.start().catch((e) => this.log.error({ e }, "restart failed"));
                 }
             }, delay);
@@ -232,21 +286,62 @@ export class Session {
 
     async stop() {
         this.stopping = true;
+        this.generation++;
         try {
             this.sock?.end(undefined);
         } catch {}
         this.status = "stopped";
     }
 
-    /** Wipe this session's credentials so the next start pairs fresh. */
-    async logout() {
+    /**
+     * Unlink from WhatsApp and wipe this session's credentials.
+     *
+     * The `sock.logout()` call is best-effort on purpose: it is what removes the
+     * entry from the phone's "Linked devices" list, but it needs a live socket,
+     * and the common reason to unlink is that the session is already broken.
+     * Failing to tell WhatsApp must not stop us clearing local state, or the
+     * session is stuck holding credentials it can no longer use.
+     */
+    async unlink() {
+        this.stopping = true;
+        this.generation++;
         try {
             await this.sock?.logout();
         } catch (e) {
             this.log.warn({ e }, "logout call failed; clearing local state anyway");
         }
+        try {
+            this.sock?.end(undefined);
+        } catch {}
         await this.clearAuth();
+        this.sock = undefined;
+        this.qr = undefined;
+        this.pairingCode = undefined;
+        this.me = undefined;
+        this.connectedAt = undefined;
+        this.reconnectAttempts = 0;
         this.status = "logged-out";
+    }
+
+    /** Unlink, then come back up on fresh credentials so a new QR appears. */
+    async relink() {
+        await this.unlink();
+        await this.start();
+    }
+
+    /**
+     * Bounce the socket without touching credentials — the escape hatch for a
+     * session stuck in `conflict`, which deliberately does not self-reconnect.
+     */
+    async restart() {
+        this.stopping = true;
+        this.generation++;
+        try {
+            this.sock?.end(undefined);
+        } catch {}
+        this.sock = undefined;
+        this.reconnectAttempts = 0;
+        await this.start();
     }
 
     // ------------------------------------------------------------- LID handling
@@ -627,16 +722,36 @@ export class Session {
 
     // -------------------------------------------------------------------- state
 
+    /**
+     * What is safe to serve without the management key.
+     *
+     * `/api/health` is public by necessity — Pironman's healthcheck and deploy
+     * gate request it unauthenticated — so nothing here may be a credential.
+     * That rules out the pairing code in particular: it is the QR in text form,
+     * and anyone who reads one during a pairing window can link their own device
+     * to the number.
+     */
     describe() {
         return {
             id: this.id,
             status: this.status,
-            me: this.me,
             connectedAt: this.connectedAt,
+        };
+    }
+
+    /** The full picture, for the management console only. */
+    describeForManagement() {
+        return {
+            ...this.describe(),
+            token: this.token,
+            webhookUrl: this.cfg.webhookUrl,
+            pairPhone: this.cfg.pairPhone,
+            sendRatePerMinute: this.cfg.sendRatePerMinute ?? config.sendRatePerMinute,
+            rateIsDefault: this.cfg.sendRatePerMinute === undefined,
+            me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,
-            hasQr: !!this.qr,
-            webhookUrl: this.cfg.webhookUrl,
+            qr: this.qr,
             webhookBacklog: this.webhook.pending,
             reconnectAttempts: this.reconnectAttempts,
         };

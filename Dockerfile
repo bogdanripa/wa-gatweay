@@ -1,6 +1,6 @@
-# Pironman runs on a Raspberry Pi 5, so this image must be linux/arm64.
-# Building on the Pi itself gets that for free. If you build on an x64 machine or
-# in GitHub Actions, you must cross-build:
+# Pironman runs on a Raspberry Pi 5, so this image must be linux/arm64. CI builds
+# it that way (see .github/workflows/deploy.yml). If you ever build it by hand
+# from an x64 machine you must cross-build:
 #     docker buildx build --platform linux/arm64 -t <registry>/wa-gateway:latest --push .
 #
 # Debian slim rather than Alpine on purpose: `sharp` (a required Baileys peer
@@ -25,20 +25,36 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Runs unprivileged. The node image already ships a `node` user.
-COPY --from=deps  --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/dist ./dist
-COPY --chown=node:node package.json ./
+# curl is not optional. Coolify's container healthcheck shells out to curl (then
+# wget), and the slim image ships neither — without it the container never
+# reports healthy and the deploy is rolled back with nothing obviously wrong.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=deps  /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package.json ./
 
 # Media is scratch space — TTL'd, re-downloadable, and deliberately not a volume.
-RUN mkdir -p /tmp/wa-media && chown node:node /tmp/wa-media
-USER node
+RUN mkdir -p /tmp/wa-media
 
-EXPOSE 8080
+# Port 80 is privileged, so this runs as root. A `USER node` line here makes the
+# process die at startup with EACCES, which reads like any other failure to boot.
+ENV PORT=80
+EXPOSE 80
 
-# /health is 503 until the WhatsApp session is actually usable, so an orchestrator
-# won't route traffic to a gateway that is sitting on an unscanned QR code.
+# Liveness, not readiness. /api/health is 200 whenever the process is up — even
+# with no numbers configured, which is exactly what a fresh deployment looks like
+# before anyone has opened the console to add the first one. Gating the container
+# on "every number is paired" would mean it could never go healthy long enough to
+# pair any. /api/ready is the strict check, for a human or a monitor.
+#
+# This must name the same path as the app's configured health_path: the platform
+# builds the container's real check from that, and this line is only the fallback
+# for when that configuration didn't land. Two different paths means whichever
+# check runs is testing a route nobody meant.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD curl -fsS http://localhost:80/api/health || exit 1
 
 CMD ["node", "dist/server.js"]

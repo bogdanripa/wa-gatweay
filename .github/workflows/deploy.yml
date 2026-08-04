@@ -1,0 +1,139 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+
+# Every run pushes the same :latest tag and the box deploys whatever that
+# points at, so two overlapping runs race and the one that FINISHES last
+# wins regardless of which commit is newer. Build times vary by an order
+# of magnitude — a small node/alpine image is a minute or two, while a
+# large image or one that compiles native dependencies can take 15+
+# minutes under QEMU emulation — so a quick follow-up commit can easily
+# land first and then be undone by its predecessor. Don't build a polling
+# timeout around either figure; time your own first run and use that.
+# One run at a time, newest wins.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: tag
+        run: echo "value=sha-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - uses: docker/build-push-action@v6
+        with:
+          platforms: linux/arm64
+          push: true
+          # So the image can report which commit it is running. A health
+          # endpoint that answers "unknown" cannot tell you whether a
+          # deploy actually landed, which is exactly when you want to
+          # know. Ignored harmlessly if the Dockerfile declares no such
+          # ARG.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          tags: |
+            ghcr.io/bogdanripa/wa-gatweay:latest
+            ghcr.io/bogdanripa/wa-gatweay:${{ steps.tag.outputs.value }}
+
+      # Tells the box what this build pushed. On the app's FIRST deploy
+      # that image is what creates its container — the app was registered
+      # as a bare id, because only this pipeline knows what it runs. After
+      # that the box watches the tag itself and this just asks it to check
+      # now rather than at the next hourly sweep. Authenticated with this
+      # app's scoped deploy key (PAAS_KEY), which can only deploy this one
+      # app. A 2xx means the new container came up healthy — the platform
+      # verifies that before answering, so a rolled-back deploy fails this
+      # step instead of going green. The control plane redeploys itself
+      # often and answers 404 while it restarts, so transient codes are
+      # retried rather than believed.
+      - name: Trigger deploy on the Pi
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -sS -o /tmp/out -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer ${{ secrets.PAAS_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d '{"image": "ghcr.io/bogdanripa/wa-gatweay:latest"}' \
+              "https://api-coolify.bogdanripa.com/apps/wa-gateway/refresh" || echo 000)
+            case "$code" in
+              2*) cat /tmp/out; echo; exit 0 ;;
+              404|000|503|504) echo "attempt $i: $code, retrying"; sleep 10 ;;
+              401) echo "PAAS_KEY is not this app's deploy key"; exit 1 ;;
+              502) cat /tmp/out; echo
+                   echo "deploy rolled back — the new container never became healthy"
+                   echo "check: apps_logs wa-gateway"; exit 1 ;;
+              *)  cat /tmp/out; echo; echo "refresh failed ($code)"; exit 1 ;;
+            esac
+          done
+          echo "gave up after 10 attempts"; exit 1
+
+      # /refresh verifies the deploy server-side and returns non-2xx if
+      # the container failed and Coolify rolled it back, so this step is a
+      # second opinion: it also catches an app that starts and answers
+      # healthily but serves errors.
+      #
+      # It requests the app's health_path (/api/health), not '/', and
+      # requires a 2xx. That distinction matters on an app that also has a
+      # frontend: '/' is answered by the static bundle straight from the
+      # CDN with no container in the path, so a '/' check goes green even
+      # when the backend is dead. Give such an app a health_path its
+      # BACKEND owns (apps_create health_path, or apps_update) and this
+      # step tests something.
+      - name: Wait for the new version to be healthy
+        run: |
+          url="https://wa-gateway-coolify.bogdanripa.com/api/health"
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            case "$code" in
+              2*) echo "up (HTTP $code)"; exit 0 ;;
+              # 404 is retried, not failed: during rollover the request can
+              # still reach the outgoing container.
+              000|404|502|503|504) echo "waiting ($code)"; sleep 6 ;;
+              *) echo "$url answered HTTP $code — the health path must "
+                 echo "return 2xx without authentication"; exit 1 ;;
+            esac
+          done
+          echo "no 2xx from $url — either the app did not come up"
+          echo "(check: apps_logs wa-gateway) or the app does not serve"
+          echo "/api/health; fix the route or change health_path"
+          exit 1
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No build step: the checked-out files ARE the site. frontend/ holds the
+      # marketing homepage, the public API docs and the management console —
+      # hand-written HTML/CSS/JS, so there is nothing to compile.
+      # index.html must end up at the zip's root.
+      - name: Package the bundle
+        run: |
+          cd frontend
+          zip -qr "$GITHUB_WORKSPACE/site.zip" .
+
+      # PAAS_KEY is this app's scoped deploy key. It is already in the repo:
+      # apps_create returns it and github_secret_set installs it. Nothing for
+      # a human to paste.
+      - name: Upload the frontend
+        run: |
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer ${{ secrets.PAAS_KEY }}" \
+            --data-binary @site.zip \
+            "https://api-coolify.bogdanripa.com/apps/wa-gateway/frontend"

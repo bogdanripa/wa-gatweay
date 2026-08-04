@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API docs — wa-gateway</title>
+<meta name="description" content="How to send WhatsApp messages and receive events through wa-gateway's whapi.cloud-compatible HTTP API.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="docs">
+
+<header>
+  <h1><a href="/">wa-gateway</a> <span class="crumb">docs</span></h1>
+  <div class="head-right">
+    <a class="btn primary" href="/console.html">Console</a>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#start">Getting started</a>
+  <a href="#auth">Authentication</a>
+  <a href="#send">Sending</a>
+  <a href="#groups">Groups</a>
+  <a href="#webhook">Receiving</a>
+  <a href="#status">Status</a>
+  <a href="#manage">Managing numbers</a>
+  <a href="#migrate">Migrating from whapi.cloud</a>
+</nav>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="start">
+  <h2>Getting started</h2>
+  <p>
+    Every request goes to this gateway's base URL, which is this host plus
+    <code>/api</code>:
+  </p>
+  <pre><code id="base-url">https://wa-gateway-coolify.bogdanripa.com/api</code></pre>
+  <p>
+    Open the <a href="/console.html">console</a>, add a number, and scan the pairing QR
+    with WhatsApp → Settings → Linked devices. The console shows a token for that
+    number — that token is how you address it.
+  </p>
+  <p>Then say hello:</p>
+  <pre><code>curl -X POST <span class="b">$BASE</span>/messages/text \
+  -H "Authorization: Bearer <span class="b">$TOKEN</span>" \
+  -H "Content-Type: application/json" \
+  -d '{"to": "40750271099", "body": "Hello from wa-gateway"}'</code></pre>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="auth">
+  <h2>Authentication</h2>
+  <p>
+    Send the number's token as a bearer token on every request:
+  </p>
+  <pre><code>Authorization: Bearer &lt;token&gt;</code></pre>
+  <p>
+    <strong>The token selects the number.</strong> There is no channel or account id in
+    any request — a gateway hosting five numbers gives you five tokens, and each one
+    reaches exactly one WhatsApp account. That is also the isolation boundary: one
+    number's token cannot see, send as, or read anything belonging to another, and it
+    cannot reach the management API.
+  </p>
+  <p class="muted">
+    A missing or unknown token is <code>401</code>. If a token leaks, rotate it from the
+    console — the old one stops working immediately.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="send">
+  <h2>Sending</h2>
+
+  <p>
+    <code>to</code> accepts whatever you have: bare digits with the country code
+    (<code>40750271099</code>), a full JID (<code>40750271099@s.whatsapp.net</code>), or a
+    group id (<code>120363012345678901@g.us</code>).
+  </p>
+
+  <h3>Text</h3>
+  <pre><code><span class="m">POST</span> /messages/text
+{ "to": "40750271099", "body": "Hello" }
+
+→ { "sent": true, "message": { "id": "3EB0..." } }</code></pre>
+
+  <h3>Image</h3>
+  <p><code>media</code> is an <code>https://</code> URL, a <code>data:</code> URI, or raw base64.</p>
+  <pre><code><span class="m">POST</span> /messages/image
+{ "to": "40750271099", "media": "https://…/cat.png", "caption": "optional" }
+
+→ { "sent": true, "message": { "id": "3EB0..." } }</code></pre>
+
+  <h3>Poll</h3>
+  <p>A real WhatsApp poll. Vote tallies arrive later on your webhook — see <a href="#poll-updates">poll updates</a>.</p>
+  <pre><code><span class="m">POST</span> /messages/poll
+{
+  "to": "120363012345678901@g.us",
+  "poll": {
+    "name": "Lunch?",
+    "options": ["Pizza", "Sushi", "Neither"],
+    "allow_multiple_answers": false
+  }
+}
+
+→ { "sent": true, "message": { "id": "3EB0..." }, "id": "3EB0..." }</code></pre>
+
+  <h3>Reaction</h3>
+  <pre><code><span class="m">PUT</span> /messages/&lt;message-id&gt;/reaction
+{ "emoji": "👍" }        // "" removes your reaction
+
+→ { "sent": true }</code></pre>
+
+  <h3>Mark as read</h3>
+  <pre><code><span class="m">PUT</span> /messages/&lt;message-id&gt;
+{ "status": "read" }
+
+→ { "sent": true }</code></pre>
+
+  <h3>Typing indicator</h3>
+  <pre><code><span class="m">PUT</span> /presences/&lt;to&gt;
+{ "presence": "typing" }   // typing | recording | paused | available
+
+→ { "sent": true }</code></pre>
+
+  <p class="muted">
+    Message ids in the two <code>PUT</code> calls are ids the gateway has seen — one it
+    gave you from a send, or one that arrived on your webhook. They're remembered for a
+    week.
+  </p>
+
+  <div class="note">
+    <strong>Rate limits.</strong> Each number has an outbound cap per minute (20 by
+    default, editable per number in the console). Exceeding it returns
+    <code>502</code> with a message saying so, rather than queueing — it's a backstop
+    against a loop in your bot, not a traffic shaper.
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="groups">
+  <h2>Groups</h2>
+  <pre><code><span class="m">GET</span> /groups/&lt;group-id&gt;
+
+→ {
+  "id": "120363012345678901@g.us",
+  "name": "Team lunch",
+  "subject": "Team lunch",
+  "participants": [ { "id": "40750271099", "name": "Bogdan" }, … ],
+  "participants_count": 12
+}</code></pre>
+  <p>
+    Participant ids come back as bare digits — real phone numbers. WhatsApp is migrating
+    identities to opaque <code>@lid</code> values, and the gateway resolves those back
+    before you ever see them, so phone-prefix logic (country, language, timezone) keeps
+    working.
+  </p>
+  <p class="muted">
+    Results are cached briefly, because WhatsApp rate-limits group metadata queries hard.
+    A group the number isn't in returns <code>404</code>.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="webhook">
+  <h2>Receiving</h2>
+  <p>
+    Inbound events are <code>POST</code>ed as JSON to the webhook URL you set for that
+    number, with that number's token in the <code>Authorization</code> header so you can
+    verify the caller.
+  </p>
+  <p>
+    Each request carries <em>one</em> of these arrays. Handle the ones you care about and
+    ignore the rest.
+  </p>
+
+  <h3>messages</h3>
+  <pre><code>{
+  "messages": [ {
+    "id": "3EB0…",
+    "from_me": false,
+    "type": "text",
+    "chat_id": "120363012345678901@g.us",   // or "40750271099@s.whatsapp.net"
+    "chat_name": "Team lunch",
+    "from": "40750271099",                   // bare digits
+    "from_name": "Bogdan",
+    "timestamp": 1754300000,
+    "text": { "body": "Hello" }
+  } ]
+}</code></pre>
+
+  <p>The payload carries one body field, matching <code>type</code>:</p>
+  <table>
+    <thead><tr><th>type</th><th>field</th></tr></thead>
+    <tbody>
+      <tr><td><code>text</code></td><td><code>text.body</code></td></tr>
+      <tr><td><code>image</code></td><td><code>image.link</code>, <code>image.preview</code>, <code>image.caption</code></td></tr>
+      <tr><td><code>gif</code></td><td><code>gif.preview</code>, <code>gif.caption</code></td></tr>
+      <tr><td><code>voice</code></td><td><code>voice.link</code></td></tr>
+      <tr><td><code>audio</code></td><td><code>audio.link</code></td></tr>
+      <tr><td><code>link_preview</code></td><td><code>link_preview.title</code>, <code>.description</code>, <code>.preview</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Media links are public and temporary.</strong> WhatsApp media arrives
+    encrypted; the gateway downloads it, decrypts it and re-hosts it at an unguessable
+    URL so your code — or a third party you hand the URL to, like an image or
+    transcription model — can fetch it with a plain GET and no credentials. Links expire
+    (48 hours by default), so fetch what you need when the event arrives.
+  </div>
+
+  <h3>groups</h3>
+  <p>Sent when a group is joined, renamed, or its membership changes.</p>
+  <pre><code>{ "groups": [ { "id": "…@g.us", "name": "Team lunch",
+               "participants": [ { "id": "40750271099", "name": "Bogdan" } ] } ] }</code></pre>
+
+  <h3>contacts</h3>
+  <pre><code>{ "contacts": [ { "id": "40750271099", "name": "Bogdan" } ] }</code></pre>
+
+  <h3 id="poll-updates">messages_updates</h3>
+  <p>Running tallies for a poll you sent. Votes are end-to-end encrypted; the gateway decrypts and aggregates them.</p>
+  <pre><code>{
+  "messages_updates": [ {
+    "after_update": {
+      "id": "3EB0…",                  // the poll message id
+      "type": "poll",
+      "chat_id": "…@g.us",
+      "poll": {
+        "name": "Lunch?",
+        "total": 3,
+        "results": [
+          { "name": "Pizza",   "count": 2, "voters": ["40750271099", "40711111111"] },
+          { "name": "Sushi",   "count": 1, "voters": ["40722222222"] },
+          { "name": "Neither", "count": 0, "voters": [] }
+        ]
+      }
+    }
+  } ]
+}</code></pre>
+
+  <div class="note">
+    <strong>Delivery is ordered and at-least-once.</strong> Events for a number are
+    delivered one at a time, in order — a slow endpoint delays that number's queue rather
+    than getting events out of sequence. Non-2xx or a timeout is retried a few times, so
+    <strong>your handler must be idempotent</strong>: dedupe on the message <code>id</code>.
+  </div>
+  <p class="muted">
+    Not forwarded at all: your own outgoing messages, status/broadcast updates, message
+    history on reconnect, and types with no body the API models — stickers, documents,
+    locations, contact cards and non-GIF video.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="status">
+  <h2>Status</h2>
+  <pre><code><span class="m">GET</span> /health   → 200 always while the service is running
+{ "ok": true, "connected": 2, "total": 3 }
+
+<span class="m">GET</span> /ready    → 200 only when every number is connected, else 503
+{ "ok": false, "connected": 2, "total": 3,
+  "sessions": [ { "id": "gepetel", "status": "connected" },
+                { "id": "second-bot", "status": "awaiting-pairing" } ] }</code></pre>
+  <p class="muted">
+    Both are public and deliberately carry no credentials. <code>/health</code> answers
+    "is the process alive"; <code>/ready</code> answers "can every number actually send",
+    which is the one to alert on — a number that quietly needs re-pairing shows up here.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="manage">
+  <h2>Managing numbers</h2>
+  <p>
+    Everything the <a href="/console.html">console</a> does is an HTTP call, if you'd
+    rather script it. These need the <strong>management key</strong>, not a number's
+    token:
+  </p>
+  <pre><code>Authorization: Bearer &lt;management key&gt;</code></pre>
+  <table>
+    <tbody>
+      <tr><td><code><span class="m">GET</span> /mgmt/numbers</code></td><td>every number: status, pairing QR, token</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers</code></td><td><code>{ id, webhookUrl, pairPhone?, sendRatePerMinute? }</code> → its new token</td></tr>
+      <tr><td><code><span class="m">PATCH</span> /mgmt/numbers/:id</code></td><td>change webhook URL, pairing phone or rate cap</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/rotate-token</code></td><td>issue a new token, revoking the old one</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/relink</code></td><td>unlink from WhatsApp and show a fresh QR</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/restart</code></td><td>reconnect without touching credentials</td></tr>
+      <tr><td><code><span class="m">DELETE</span> /mgmt/numbers/:id</code></td><td>remove the number and purge its stored state</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">
+    The management key can add numbers and read every token, so treat it as the most
+    sensitive credential here. Repeated bad guesses from one address are locked out.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section id="migrate">
+  <h2>Migrating from whapi.cloud</h2>
+  <p>
+    The endpoints, request bodies, response shapes and webhook payloads above are
+    whapi's. For an existing bot, the migration is two configuration values:
+  </p>
+  <pre><code>WHAPI_BASE_URL = https://wa-gateway-coolify.bogdanripa.com/api
+WHAPI_TOKEN    = &lt;the token the console showed for your number&gt;</code></pre>
+  <p>
+    If your bot hardcodes <code>https://gate.whapi.cloud</code>, lift that into a variable
+    first — that's the only code change. Rolling back is pointing the variable at whapi
+    again, so keep the old channel alive for a week and the migration stays reversible.
+  </p>
+  <p class="muted">
+    Not implemented, because nothing here needed them: documents, stickers, locations,
+    contact cards, channels/newsletters, and whapi's account-management endpoints.
+  </p>
+</section>
+
+<footer>
+  <a href="/">Home</a> · <a href="/console.html">Console</a> ·
+  <a href="/api/health">Status</a>
+</footer>
+
+<script>
+  // The docs are served from the same host as the API they describe, so the base
+  // URL is knowable rather than a placeholder someone has to substitute.
+  document.querySelectorAll('#base-url').forEach((n) => {
+    n.textContent = location.origin + '/api';
+  });
+</script>
+</body>
+</html>

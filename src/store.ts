@@ -8,6 +8,26 @@ import { logger } from "./log.js";
  * their `_id` (they're looked up by exact key); the rest carry an indexed field.
  */
 
+/**
+ * A configured WhatsApp number. This is the record the management console
+ * creates, and it is the reason the gateway no longer needs a redeploy to host
+ * another number.
+ *
+ * `_id` is the session id, which namespaces every other collection's documents —
+ * so a session's config and its state are keyed the same way, and deleting one
+ * tells you exactly what to purge.
+ */
+export interface SessionDoc {
+    _id: string;
+    /** Bearer token the owning bot sends. Unique across sessions. */
+    token: string;
+    webhookUrl: string;
+    pairPhone?: string;
+    sendRatePerMinute?: number;
+    createdAt: Date;
+    updatedAt: Date;
+}
+
 /** id -> the full WAMessageKey, so whapi-style "act on this message id" calls work. */
 export interface MessageKeyDoc {
     /** `${sessionId}:${messageId}` — message ids are only unique within a session. */
@@ -44,6 +64,7 @@ export interface MediaDoc {
 
 export interface Stores {
     db: Db;
+    sessions: Collection<SessionDoc>;
     authCreds: Collection<{ _id: string; value: string }>;
     authKeys: Collection<{ _id: string; value: string }>;
     messageKeys: Collection<MessageKeyDoc>;
@@ -57,6 +78,7 @@ export async function connectStores(): Promise<Stores> {
     await client.connect();
     const db = client.db(config.mongoDb);
 
+    const sessions = db.collection<SessionDoc>("sessions");
     const authCreds = db.collection<{ _id: string; value: string }>("auth_creds");
     const authKeys = db.collection<{ _id: string; value: string }>("auth_keys");
     const messageKeys = db.collection<MessageKeyDoc>("message_keys");
@@ -65,6 +87,11 @@ export async function connectStores(): Promise<Stores> {
 
     const index = (p: Promise<unknown>, what: string) =>
         p.catch((e) => logger.warn({ e }, `index: ${what}`));
+
+    // Not tolerant like the others: two sessions sharing a token makes routing
+    // ambiguous, so one bot would silently drive the wrong WhatsApp number. The
+    // API checks for it too, but only the index makes it impossible.
+    await sessions.createIndex({ token: 1 }, { unique: true });
 
     // Message keys only need to outlive the window in which a bot might react to
     // or mark-as-read a message. A week is generous.
@@ -82,10 +109,11 @@ export async function connectStores(): Promise<Stores> {
     );
     await index(media.createIndex({ sessionId: 1 }), "media sessionId");
 
-    logger.info({ db: config.mongoDb, sessions: config.sessions.length }, "mongo connected");
+    logger.info({ db: config.mongoDb }, "mongo connected");
 
     return {
         db,
+        sessions,
         authCreds,
         authKeys,
         messageKeys,

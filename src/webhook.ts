@@ -30,6 +30,18 @@ export class WebhookSender {
         this.log = logger.child({ session: sessionId, mod: "webhook" });
     }
 
+    /**
+     * Point deliveries at a new URL or token, keeping the queue intact.
+     *
+     * Replacing the sender outright would drop whatever is still queued, and the
+     * ordering guarantee above only holds because that queue is never discarded —
+     * anything already enqueued is delivered to the new target, in order.
+     */
+    retarget(url: string, token: string) {
+        this.url = url;
+        this.token = token;
+    }
+
     /** Enqueue a payload. Resolves once this payload has been attempted. */
     send(payload: Record<string, any>): Promise<void> {
         this.depth++;

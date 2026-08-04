@@ -9,10 +9,31 @@ function optional(name: string, fallback: string): string {
 }
 
 /**
+ * Numbers come from the environment as strings, and a typo in one used to fail
+ * open: `parseInt("twenty")` is NaN, and `NaN < 1` is false, which silently
+ * disabled the send rate limiter — the one guard standing between a bug and a
+ * WhatsApp ban. Refuse to start instead.
+ */
+function positiveInt(name: string, fallback: number): number {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+        throw new Error(`${name} must be a positive integer, got "${raw}"`);
+    }
+    return n;
+}
+
+/**
  * One WhatsApp number. The gateway hosts several, exactly like a whapi account
  * holds several channels — and, as with whapi, the bearer token is what selects
- * which one a request is for. That's why gepetel needs no change to work in a
- * multi-number deployment: it already sends a token, it just gets its own.
+ * which one a request is for. That's why the bots need no change to work in a
+ * multi-number deployment: they already send a token, they just get their own.
+ *
+ * These are no longer environment variables. They live in Mongo (see
+ * `sessionStore.ts`) so numbers can be added and paired from the management
+ * console without a redeploy — a redeploy replaces the container, and waiting
+ * for one just to add a number was the whole reason this moved.
  */
 export interface SessionConfig {
     /** Stable identifier. Used to namespace all stored state — never change it. */
@@ -28,101 +49,116 @@ export interface SessionConfig {
 }
 
 /**
- * Sessions are declared with indexed env vars rather than one JSON blob, so each
- * token is its own variable — you can rotate one number's credentials with a
- * single `apps_env_set` instead of rewriting a JSON string containing every
- * other number's secrets.
+ * Pironman proxies only `/api/*` to an app's container; every other path is
+ * answered by the static bundle without the container ever seeing it. So the
+ * whole HTTP surface — the whapi-compatible endpoints included — lives under
+ * this prefix, and the bots' base URL carries it.
  *
- *   WA_SESSION_1_ID=gepetel
- *   WA_SESSION_1_TOKEN=...
- *   WA_SESSION_1_WEBHOOK_URL=https://.../whapi
- *   WA_SESSION_1_PAIR_PHONE=40750271099        # optional
- *   WA_SESSION_1_SEND_RATE_PER_MINUTE=20       # optional
- *
- *   WA_SESSION_2_ID=other-bot
- *   ...
- *
- * Indices need not be contiguous; anything up to 64 is scanned.
+ * The whapi contract is unchanged *relative to the base URL*: gepetel builds
+ * every request as `${WHAPI_BASE_URL}/messages/text` and friends, so pointing
+ * that at `https://…/api` is a config value, not a code change.
  */
-function parseSessions(): SessionConfig[] {
-    const sessions: SessionConfig[] = [];
+export const API_PREFIX = "/api";
 
-    for (let i = 1; i <= 64; i++) {
-        const id = process.env[`WA_SESSION_${i}_ID`];
-        if (!id) continue;
+const publicUrl = optional("WA_PUBLIC_URL", "")
+    .replace(/\/+$/, "")
+    // Defensive: WA_PUBLIC_URL is the app root, and media links append the API
+    // prefix themselves. Someone who sets it to the bots' base URL (which does
+    // end in /api) would otherwise get /api/api/media/… links that 404 inside
+    // OpenAI's fetcher, where the failure is invisible.
+    .replace(/\/api$/, "");
 
-        const token = process.env[`WA_SESSION_${i}_TOKEN`];
-        const webhookUrl = process.env[`WA_SESSION_${i}_WEBHOOK_URL`];
-        if (!token) throw new Error(`WA_SESSION_${i}_TOKEN is required (session "${id}")`);
-        if (!webhookUrl) throw new Error(`WA_SESSION_${i}_WEBHOOK_URL is required (session "${id}")`);
-
-        // The id namespaces Mongo document ids and appears in URLs, so keep it to
-        // characters that can't produce ambiguous keys or need escaping.
-        if (!/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(id)) {
-            throw new Error(
-                `WA_SESSION_${i}_ID "${id}" is invalid: use 1-32 chars of [a-z0-9_-], starting alphanumeric`
-            );
-        }
-
-        const rate = process.env[`WA_SESSION_${i}_SEND_RATE_PER_MINUTE`];
-
-        sessions.push({
-            id,
-            token,
-            webhookUrl,
-            pairPhone: (process.env[`WA_SESSION_${i}_PAIR_PHONE`] || "").replace(/\D/g, "") || undefined,
-            sendRatePerMinute: rate ? parseInt(rate, 10) : undefined,
-        });
-    }
-
-    if (!sessions.length) {
+/**
+ * The management key, or null when the gateway has not been configured yet.
+ *
+ * Everything else in this file fails fast on bad input, and this used to as
+ * well. It can't: the deployment platform will not accept environment variables
+ * for an app that has never produced a running container, so a gateway that
+ * refuses to boot without its key can never *be* given one. The first deploy of
+ * any fresh install necessarily happens unconfigured.
+ *
+ * So "unconfigured" is a state rather than a crash — but a fail-closed one. With
+ * no key the management API is switched off entirely (503 on every route), which
+ * is strictly safer than any default value could be, `/api/ready` refuses to go
+ * green, and startup says so loudly. What it does not do is crash-loop a
+ * container nobody can configure.
+ */
+function managementKeyOrNull(): string | null {
+    const key = process.env.WA_MANAGEMENT_KEY || "";
+    if (!key) return null;
+    if (key.length < 16) {
+        // Short keys still throw. Once you're configuring the thing, a guessable
+        // key is a mistake worth stopping for — this one adds WhatsApp numbers
+        // and reads every bot's token, from the public internet.
         throw new Error(
-            "No sessions configured. Set at least WA_SESSION_1_ID, WA_SESSION_1_TOKEN and WA_SESSION_1_WEBHOOK_URL."
+            "WA_MANAGEMENT_KEY must be at least 16 characters — generate one with `openssl rand -base64 32`"
         );
     }
+    return key;
+}
 
-    // Duplicate ids would silently share auth state — two numbers fighting over
-    // one device slot, which ends in both being logged out. Duplicate tokens would
-    // make routing ambiguous. Both are worth refusing to start over.
-    const ids = new Set<string>();
-    const tokens = new Set<string>();
-    for (const s of sessions) {
-        const lower = s.id.toLowerCase();
-        if (ids.has(lower)) throw new Error(`Duplicate session id "${s.id}"`);
-        if (tokens.has(s.token)) throw new Error(`Duplicate session token (session "${s.id}")`);
-        ids.add(lower);
-        tokens.add(s.token);
-    }
+const managementKey = managementKeyOrNull();
 
-    return sessions;
+/**
+ * Mongo connection string. All sessions share it; state is namespaced by id.
+ *
+ * Falls back to `DATABASE_URL`, which is what Pironman injects for an app's
+ * attached database — and it recomposes that string on every deploy, because the
+ * database container's hostname changes whenever the resource is rebuilt.
+ * Copying it into `WA_MONGO_URL` once would work right up until it didn't.
+ */
+function mongoUrl(): string {
+    const url = process.env.WA_MONGO_URL || process.env.DATABASE_URL;
+    if (!url) throw new Error("Missing required env var WA_MONGO_URL (or DATABASE_URL)");
+    return url;
 }
 
 export const config = {
-    /** Mongo connection string. All sessions share it; state is namespaced by id. */
-    mongoUrl: required("WA_MONGO_URL"),
+    mongoUrl: mongoUrl(),
     mongoDb: optional("WA_MONGO_DB", "wa_gateway"),
 
-    /** One entry per WhatsApp number. */
-    sessions: parseSessions(),
+    /** This gateway's public HTTPS base URL — the app root, no trailing slash. */
+    publicUrl,
+
+    /** Base for the media links handed to the bots, which fetch them server-side. */
+    mediaBaseUrl: `${publicUrl}${API_PREFIX}/media`,
+
+    /** Secret for the management console, or null until one is set. */
+    managementKey,
 
     /**
-     * This gateway's public HTTPS base URL, no trailing slash. Media links handed
-     * to the bots are built from it, and they fetch those links server-side.
-     * On Pironman: https://<app-id>-coolify.bogdanripa.com
+     * Whether this gateway has everything it needs to actually be used. False on
+     * a fresh install between the first deploy and someone setting the env vars.
      */
-    publicUrl: required("WA_PUBLIC_URL").replace(/\/+$/, ""),
+    configured: !!managementKey && !!publicUrl,
 
-    /** Password for the /admin pairing page (username is ignored). */
-    adminPassword: required("WA_ADMIN_PASSWORD"),
+    /** What's missing, for the startup log and `/api/ready`. */
+    missingConfig: [
+        managementKey ? null : "WA_MANAGEMENT_KEY",
+        publicUrl ? null : "WA_PUBLIC_URL",
+    ].filter((x): x is string => x !== null),
 
-    port: parseInt(optional("PORT", "8080"), 10),
+    port: positiveInt("PORT", 8080),
+
+    /**
+     * Bind address. `::` is dual-stack in Node, which is what the platform
+     * needs: the container's healthcheck runs *inside* against localhost (IPv6
+     * first), while the proxy connects from outside over IPv4. Binding only one
+     * family fails in one of two ways — a refused healthcheck that rolls the
+     * deploy back, or, worse, a container that reports healthy while every
+     * proxied request 502s.
+     *
+     * Overridable because a literal `::` throws EAFNOSUPPORT on a dev box with
+     * no IPv6.
+     */
+    host: optional("HOST", "::"),
 
     /** How long downloaded media stays fetchable before cleanup. */
-    mediaTtlHours: parseInt(optional("WA_MEDIA_TTL_HOURS", "48"), 10),
+    mediaTtlHours: positiveInt("WA_MEDIA_TTL_HOURS", 48),
     mediaDir: optional("WA_MEDIA_DIR", "/tmp/wa-media"),
 
     /** Default outbound cap per session, per minute. Overridable per session. */
-    sendRatePerMinute: parseInt(optional("WA_SEND_RATE_PER_MINUTE", "20"), 10),
+    sendRatePerMinute: positiveInt("WA_SEND_RATE_PER_MINUTE", 20),
 
     logLevel: optional("WA_LOG_LEVEL", "info"),
 };

@@ -77,7 +77,7 @@ export class MediaStore {
                 createdAt: new Date(),
             });
 
-            const link = `${config.publicUrl}/media/${id}`;
+            const link = `${config.mediaBaseUrl}/${id}`;
 
             // Images and GIFs also carry a small JPEG thumbnail inline. gepetel's
             // GIF branch reads only `preview`, so surface it as a data URI —
