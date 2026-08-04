@@ -81,6 +81,7 @@ interface Tracked {
 export class ConnectionWatcher {
     private state = new Map<string, Tracked>();
     private timer?: NodeJS.Timeout;
+    private shuttingDown = false;
 
     constructor(
         private manager: SessionManager,
@@ -101,6 +102,12 @@ export class ConnectionWatcher {
     }
 
     stop() {
+        // Silences alerts for the rest of this process's life, not just the
+        // timer. A container being replaced can watch its own session get kicked
+        // off the device slot on the way out, and an alert sent by a process
+        // that is about to exit can never be followed by its recovery — you get
+        // a red message and nothing else, for a deploy that worked.
+        this.shuttingDown = true;
         if (this.timer) clearInterval(this.timer);
         this.timer = undefined;
     }
@@ -115,6 +122,7 @@ export class ConnectionWatcher {
     }
 
     private sweep() {
+        if (this.shuttingDown) return;
         const now = Date.now();
         const live = new Set<string>();
 
