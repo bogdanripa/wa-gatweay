@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
     digitsOf,
+    preferPhoneNumber,
     isGroupJid,
     looksLikePhoneNumber,
     stripDevice,
@@ -309,4 +310,58 @@ test("poll updates match what gepetel's recordPollVotes reads", () => {
     assert.deepEqual(found.poll.results[0].voters, ["40750271099", "40711222333"]);
     assert.equal(found.poll.results[1].count, 0);
     assert.equal(found.poll.total, 2);
+});
+
+
+/**
+ * LID resolution, the failure mode this whole path exists to prevent.
+ *
+ * WhatsApp is moving group addressing to opaque `@lid` ids. Their digits are
+ * NOT a phone number, but `digitsOf` will happily emit them as if they were,
+ * and gepetel then infers a country and language from "1395…". Baileys v7
+ * ships the real phone-number JID alongside, as `participantAlt`/`remoteJidAlt`.
+ */
+const LID = "139556506575001@lid";
+const PN = "40750271099@s.whatsapp.net";
+
+test("a LID resolves to the phone-number form shipped beside it", () => {
+    assert.equal(preferPhoneNumber(LID, PN), PN);
+});
+
+test("digits of an unresolved LID are indistinguishable from a phone number", () => {
+    // Why the alt matters at all: nothing downstream can tell these apart.
+    assert.equal(digitsOf(LID), "139556506575001");
+    assert.ok(/^\d+$/.test(digitsOf(LID)));
+});
+
+test("a non-LID jid is left alone — there is nothing to resolve", () => {
+    assert.equal(preferPhoneNumber(PN, "40711111111@s.whatsapp.net"), null);
+});
+
+test("a LID whose alt is also a LID resolves to nothing", () => {
+    // Better to fall through to the mapping store and then warn than to emit
+    // a second LID as though it were a number.
+    assert.equal(preferPhoneNumber(LID, "987654321098765@lid"), null);
+});
+
+test("a missing or empty alt resolves to nothing", () => {
+    assert.equal(preferPhoneNumber(LID, undefined), null);
+    assert.equal(preferPhoneNumber(LID, ""), null);
+    assert.equal(preferPhoneNumber(LID, null), null);
+});
+
+test("a group jid is never offered as a sender's phone number", () => {
+    assert.equal(preferPhoneNumber(LID, GROUP), null);
+});
+
+test("an alt too long to be E.164 is refused", () => {
+    // 16 digits — a LID that lost its @lid suffix would land here.
+    assert.equal(preferPhoneNumber(LID, "1234567890123456@s.whatsapp.net"), null);
+});
+
+test("a resolved sender reaches gepetel as real phone digits", () => {
+    const resolved = preferPhoneNumber(LID, PN) ?? LID;
+    assert.equal(toWhapiUserId(resolved), "40750271099");
+    // And the country prefix gepetel keys off is now the right one.
+    assert.ok(toWhapiUserId(resolved).startsWith("40"));
 });

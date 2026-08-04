@@ -81,6 +81,32 @@ export function toWaJid(input: string | undefined | null): string {
     return d ? `${d}${S_WHATSAPP}` : "";
 }
 
+/**
+ * Given a JID and the `…Alt` counterpart Baileys ships beside it, return the
+ * phone-number form if the pair offers one.
+ *
+ * In a LID-addressed chat the message key carries both: `participant` is the
+ * LID, `participantAlt` is the phone-number JID (likewise `remoteJid` /
+ * `remoteJidAlt`). That is WhatsApp's own mapping, delivered with the message —
+ * no lookup, no dependency on a prior history sync.
+ *
+ * Returns null when there is nothing better than what we already have, so the
+ * caller can fall through to the mapping store and then to a loud warning. It
+ * must never invent a phone number: an unresolved LID's digits look exactly
+ * like one to anything downstream, which is the failure this whole path exists
+ * to prevent.
+ */
+export function preferPhoneNumber(
+    jid: string | undefined | null,
+    alt: string | undefined | null
+): string | null {
+    const j = String(jid ?? "");
+    if (!j || !isLidJid(j)) return null;
+    const a = String(alt ?? "");
+    if (!a || isLidJid(a) || isGroupJid(a)) return null;
+    return looksLikePhoneNumber(a) ? a : null;
+}
+
 /** Does this look like a phone number rather than a LID or group id? */
 export function looksLikePhoneNumber(jid: string | undefined | null): boolean {
     if (!jid) return false;

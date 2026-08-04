@@ -21,7 +21,26 @@ import {
     classify,
     unwrap,
 } from "./map.js";
-import { digitsOf, isGroupJid, isLidJid, toWaJid, toWhapiUserId } from "./jid.js";
+import {
+    digitsOf,
+    isGroupJid,
+    isLidJid,
+    preferPhoneNumber,
+    stripDevice,
+    toWaJid,
+    toWhapiUserId,
+} from "./jid.js";
+
+/**
+ * History sync types we accept: identity and naming data, never message
+ * backfill. See the `shouldSyncHistoryMessage` call for why this is a
+ * allow-list rather than the blanket `false` it used to be.
+ */
+const HISTORY_TYPES_WORTH_SYNCING = new Set<number>([
+    proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP,
+    proto.HistorySync.HistorySyncType.PUSH_NAME,
+    proto.HistorySync.HistorySyncType.NON_BLOCKING_DATA,
+]);
 
 export type SessionStatus =
     | "starting"
@@ -115,6 +134,8 @@ export class Session {
     messagesReceived = 0;
     /** Throttles the Mongo write behind lastMessageAt. */
     private lastActivityPersistedAt = 0;
+    /** Contact names already sent, so unchanged ones are not re-sent. */
+    private emittedContacts = new Map<string, string>();
 
     constructor(
         private cfg: SessionConfig,
@@ -181,10 +202,30 @@ export class Session {
             // is headless and `apps_logs` is a poor QR renderer.
             printQRInTerminal: false,
             browser: [`Gateway (${this.id})`, "Chrome", "1.0.0"],
-            // The bots never read history; syncing it just burns Pi memory and
-            // Mongo writes on every reconnect, multiplied by the session count.
+            // The bots never read history, but refusing *all* of it was too blunt.
+            //
+            // Baileys ships seven history types down one switch, and turning them
+            // all off costs the two things this gateway most depends on: the
+            // initial LID↔phone-number mappings, and the contact/chat names. It
+            // says so on connect ("DANGER: … PREVENTS BAILEYS FROM ACCESSING
+            // INITIAL LID MAPPINGS"), and the symptom is senders arriving as raw
+            // LID digits that gepetel then reads as a phone number.
+            //
+            // So allow only the metadata types and still refuse the message
+            // backfill, which is the part that actually burns Pi memory and Mongo
+            // writes on every reconnect:
+            //
+            //   INITIAL_BOOTSTRAP (0)  contacts, chats, LID mappings   ✓
+            //   PUSH_NAME         (4)  the names people set themselves ✓
+            //   NON_BLOCKING_DATA (5)  supplementary contact data      ✓
+            //   FULL (2) / RECENT (3) / ON_DEMAND (6)  message backfill ✗
+            //   INITIAL_STATUS_V3 (1)  statuses/stories                ✗
+            //
+            // Nothing from a sync can reach a bot regardless: `onMessages` only
+            // forwards `type === "notify"`, and history arrives as "append".
             syncFullHistory: false,
-            shouldSyncHistoryMessage: () => false,
+            shouldSyncHistoryMessage: (msg: proto.Message.IHistorySyncNotification) =>
+                HISTORY_TYPES_WORTH_SYNCING.has(msg.syncType as number),
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid: string) => this.groupCache.get(jid)?.meta,
@@ -388,16 +429,37 @@ export class Session {
      * them guess the wrong language. That's the worst failure mode available, so
      * resolve aggressively and log when we can't.
      */
-    private async resolveToPn(jid: string | undefined | null): Promise<string> {
+    private async resolveToPn(jid: string | undefined | null, alt?: string | null): Promise<string> {
         const j = String(jid ?? "");
         if (!j || isGroupJid(j)) return j;
         if (!isLidJid(j)) return j;
+
+        // Best source first: in a LID-addressed chat, Baileys v7 puts the
+        // phone-number form of the sender right on the message key —
+        // `participantAlt` next to `participant`, `remoteJidAlt` next to
+        // `remoteJid`. That is WhatsApp's own answer, delivered with the
+        // message, and it needs no lookup and no prior history sync.
+        //
+        // Missing this was why senders arrived as raw LID digits: they aren't
+        // phone numbers, but `digitsOf` will happily emit them as if they were,
+        // and gepetel then infers a country from "1395…".
+        const altJid = preferPhoneNumber(j, alt);
+        if (altJid) {
+            // Teach the mapping store, so a later message that arrives without
+            // an alt — a poll vote, a group roster — resolves from cache.
+            void this.sock?.signalRepository?.lidMapping
+                ?.storeLIDPNMappings([{ lid: stripDevice(j), pn: stripDevice(altJid) }])
+                .catch((e: unknown) => this.log.debug({ e }, "could not cache LID mapping"));
+            return altJid;
+        }
+
         try {
             const pn = await this.sock?.signalRepository?.lidMapping?.getPNForLID(j);
             if (pn) return pn;
         } catch (e) {
             this.log.debug({ e, jid: j }, "LID resolution threw");
         }
+
         this.log.warn({ jid: j }, "unresolved LID — phone-prefix inference will be wrong for this id");
         return j;
     }
@@ -443,10 +505,15 @@ export class Session {
             return;
         }
 
-        const chatJid = await this.resolveToPn(msg.key.remoteJid);
+        // `…Alt` carries the phone-number form when the chat is LID-addressed.
+        const key = msg.key as typeof msg.key & {
+            remoteJidAlt?: string;
+            participantAlt?: string;
+        };
+        const chatJid = await this.resolveToPn(key.remoteJid, key.remoteJidAlt);
         const isGroup = isGroupJid(msg.key.remoteJid);
         const senderJid = isGroup
-            ? await this.resolveToPn(msg.key.participant || msg.participant)
+            ? await this.resolveToPn(key.participant || msg.participant, key.participantAlt)
             : chatJid;
 
         // Remember the key so whapi-style "act on this id" calls (mark read, react)
@@ -455,7 +522,16 @@ export class Session {
 
         let chatName: string | undefined;
         if (isGroup) {
-            const meta = await this.getGroupMetadata(msg.key.remoteJid).catch(() => undefined);
+            // Was `.catch(() => undefined)`, which made a failing metadata fetch
+            // indistinguishable from a group with no subject — the message still
+            // went out, just anonymously, with nothing anywhere to explain it.
+            const meta = await this.getGroupMetadata(msg.key.remoteJid).catch((e) => {
+                this.log.warn(
+                    { e, jid: msg.key.remoteJid },
+                    "could not read group metadata — this message goes out without its group name"
+                );
+                return undefined;
+            });
             chatName = meta?.subject;
         }
 
@@ -543,13 +619,20 @@ export class Session {
     }
 
     private async onGroups(groups: GroupMetadata[]) {
+        // Free metadata — this event already carries everything a fetch would
+        // return, so caching it here spares a rate-limited round trip later.
+        for (const g of groups) this.cacheGroup(g);
         for (const g of groups) await this.emitGroupEvent(g.id, g);
     }
 
     private async onGroupsUpdate(groups: Partial<GroupMetadata>[]) {
         for (const g of groups) {
             if (!g.id) continue;
-            this.groupCache.delete(g.id);
+            // An update carries only the changed fields. If the subject is one
+            // of them, that IS the fresh value — keep it rather than dropping
+            // the entry and hoping the refetch succeeds.
+            if (g.subject) this.cacheGroup({ ...this.groupCache.get(g.id)?.meta, ...g });
+            else this.groupCache.delete(g.id);
             await this.emitGroupEvent(g.id);
         }
     }
@@ -576,14 +659,35 @@ export class Session {
         }
     }
 
+    /**
+     * Forward contact names, but only when they're actually news.
+     *
+     * WhatsApp re-emits `contacts.update` for the same contact with the same
+     * name over and over, and now that history sync is on, connecting produces
+     * a burst of them for the entire address book. Every one of those used to be
+     * its own webhook delivery — a bot being told six times an hour that AdiC is
+     * still called AdiC, and a visible pile of noise in anything watching the
+     * endpoint.
+     *
+     * So remember what we've already said and send only the differences.
+     */
     private async onContacts(contacts: Array<Partial<import("baileys").Contact>>) {
         const payload = [];
         for (const c of contacts) {
             const name = c.name || c.notify;
             if (!c.id || !name) continue;
-            const jid = await this.resolveToPn(c.id);
-            payload.push({ id: digitsOf(jid), name });
+            // `phoneNumber` is the resolved form when `id` is a LID.
+            const jid = await this.resolveToPn(c.id, c.phoneNumber);
+            const id = digitsOf(jid);
+            if (!id || this.emittedContacts.get(id) === name) continue;
+            this.emittedContacts.set(id, name);
+            payload.push({ id, name });
         }
+
+        // Bounded: an address book is finite, but this must not be the thing
+        // that grows a long-lived process out of memory.
+        if (this.emittedContacts.size > 5000) this.emittedContacts.clear();
+
         if (payload.length) await this.webhook.send({ contacts: payload });
     }
 
@@ -715,10 +819,29 @@ export class Session {
         // getGroupInfo on every single group event.
         if (cached && Date.now() - cached.at < 5 * 60_000) return cached.meta;
 
-        const sock = this.assertReady();
-        const meta = await sock.groupMetadata(jid);
-        this.groupCache.set(jid, { meta, at: Date.now() });
-        return meta;
+        try {
+            const sock = this.assertReady();
+            const meta = await sock.groupMetadata(jid);
+            this.groupCache.set(jid, { meta, at: Date.now() });
+            return meta;
+        } catch (e) {
+            // A stale name is enormously better than no name. WhatsApp
+            // rate-limits these queries and the socket may be mid-reconnect, so
+            // a refresh failing is routine — but dropping the group's name from
+            // every message until it succeeds is not, and that is what made
+            // messages arrive as "in a group" with no idea which.
+            if (cached) {
+                this.log.debug({ e, jid }, "group metadata refresh failed, using cached");
+                return cached.meta;
+            }
+            throw e;
+        }
+    }
+
+    /** Remember metadata Baileys volunteers, so we don't have to go asking. */
+    private cacheGroup(meta?: Partial<GroupMetadata>) {
+        if (!meta?.id || !meta.subject) return;
+        this.groupCache.set(meta.id, { meta: meta as GroupMetadata, at: Date.now() });
     }
 
     /**

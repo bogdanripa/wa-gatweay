@@ -31,7 +31,20 @@ Also reads: `id`, `from_me`, `chat_id`, `chat_name`, `from`, `from_name`, plus `
 
 ## Things that will bite you
 
-**LIDs.** WhatsApp is migrating identities from phone numbers to `…@lid`. An unresolved LID doesn't throw anywhere — it makes gepetel infer the wrong language for a group. Always resolve to a phone number before emitting an id: prefer `GroupParticipant.phoneNumber`, fall back to `signalRepository.lidMapping.getPNForLID()`. `toWhapiChatId` deliberately passes an unresolved LID through *unchanged* rather than reshaping it, so the bug stays visible.
+**LIDs.** WhatsApp is migrating identities from phone numbers to `…@lid`. An unresolved LID doesn't throw anywhere — it makes gepetel infer the wrong language for a group. This bit in production: senders arrived as `139556506575001`, which is a LID's digits, not a number.
+
+Resolve in this order, and don't drop a step:
+
+1. **`key.participantAlt` / `key.remoteJidAlt`** — Baileys v7 ships the phone-number form on the message key itself when the chat is LID-addressed. It's WhatsApp's own mapping, needs no lookup, and works on a cold start. `preferPhoneNumber` in `jid.ts` is this rule, and it's unit-tested.
+2. `GroupParticipant.phoneNumber` for rosters.
+3. `signalRepository.lidMapping.getPNForLID()`, which only works if the mapping store was populated — see the history-sync note below.
+4. Failing all that, warn loudly and pass the LID through unchanged. `toWhapiChatId` deliberately does not reshape it, so the bug stays visible.
+
+Resolutions from step 1 are written back with `storeLIDPNMappings`, so later events that arrive without an alt (poll votes, rosters) hit the cache.
+
+**History sync is an allow-list, not off.** `shouldSyncHistoryMessage: () => false` looks harmless — the bots never read history — but it disables all seven of Baileys' sync types, and two of them carry the LID↔phone mappings and the contact/chat names. Baileys says so on connect ("DANGER: … PREVENTS BAILEYS FROM ACCESSING INITIAL LID MAPPINGS"), and the symptom is item 3 above silently returning null forever. Allow `INITIAL_BOOTSTRAP`, `PUSH_NAME` and `NON_BLOCKING_DATA`; keep refusing `FULL`/`RECENT`/`ON_DEMAND`, which are the actual message backfill. Nothing from a sync can reach a bot anyway — `onMessages` only forwards `type === "notify"`.
+
+Turning sync on means a burst of `contacts.update` on every connect, which is why `onContacts` dedupes against what it has already emitted. Without that, a bot gets told the same name dozens of times per reconnect.
 
 **One instance, one session per number.** Two clients on the same credentials get `connectionReplaced` (440) and eventually a logout. The session stops rather than reconnecting; don't "fix" that by adding a retry. Ids are unique because they're the `sessions` primary key, and tokens carry a unique index, for the same reason.
 
