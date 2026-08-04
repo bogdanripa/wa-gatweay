@@ -47,6 +47,12 @@ A session id can never change: it namespaces every other document (`"<id>:<key>"
 
 It is also unauthenticated, because the healthcheck and deploy gate request it that way. It must never carry identifying detail — it previously returned every session's full state, **pairing code included**, to anyone on the internet. A pairing code is the QR in text form: whoever reads one during a pairing window links their own device to the number. That's why `Session.describe()` is deliberately thin and `describeForManagement()` is the one behind the key.
 
+**An unconfigured gateway boots inert — don't "fix" that back into a crash.** Everything else in `config.ts` fails fast, and `WA_MANAGEMENT_KEY` used to as well. It can't: the platform will not accept environment variables for an app that has never produced a running container, so a gateway that refuses to boot without its key can never *be* given one. The first deploy of any fresh install is unconfigured by construction.
+
+It is fail-*closed*, not lax: no key means the management router is replaced wholesale with a 503, so there is no compare to get wrong — in particular no empty-string key matching an empty bearer token. A key that is present but too short still throws.
+
+**`WA_MONGO_DB` empty means "whatever the connection string names."** A managed database's user is authorised for exactly the database in its URL path. A hardcoded name doesn't fail at connect — it connects, then throws `Unauthorized` on the first `createIndex`, which reads like a broken schema. That cost a deploy; the error is now wrapped to say so.
+
 **The management key is the keys to every number.** It creates sessions, reads every bot's token, and can unlink an account — from the public internet. Compare it in constant time, keep the failed-attempt throttle, and don't let a session token reach `/api/mgmt/*` (a compromised bot must not be able to enumerate the others). `trust proxy` is set for the throttle's benefit: without it every request looks like it came from Pironman's proxy and one attacker locks out the operator.
 
 **`messages.upsert` type.** Only `"notify"` is a live message. `"append"` is history backfill — forwarding it makes bots reply to week-old messages.

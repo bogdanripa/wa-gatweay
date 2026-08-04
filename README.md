@@ -43,19 +43,26 @@ Three consequences worth internalising before you deploy:
 The app is one Pironman app of kind **both**: a container serving `/api/*`, and a static bundle — the management console — serving everything else. That split isn't a preference; Pironman routes only `/api/*` to a container, and the rest is answered by the bundle without the container ever seeing it.
 
 ```bash
-apps_create id=wa-gateway health_path=/api/health
+apps_create id=wa-gateway db_engine=mongo health_path=/api/health
+github_secret_set PAAS_KEY=<the paas_key apps_create returned>
+apps_deploy_workflow id=wa-gateway     # write .github/workflows/deploy.yml
+git push                               # CI builds arm64, ships both halves
 
+# Only now — a container has to exist before the platform will take env vars.
 apps_env_set id=wa-gateway \
-  WA_MONGO_URL=...  WA_MONGO_DB=wa_gateway \
   WA_PUBLIC_URL=https://wa-gateway-coolify.bogdanripa.com \
   WA_MANAGEMENT_KEY=<openssl rand -base64 32>
 
-apps_deploy_workflow id=wa-gateway     # ships the container
-apps_frontend_write id=wa-gateway      # ships frontend/ as the console
-apps_logs id=wa-gateway
+apps_update id=wa-gateway sleep_when_idle=false
 ```
 
-`health_path` matters: `/` is answered by the static bundle with no container in the path, so a healthcheck pointed there would pass with the gateway dead.
+Three things that each cost a deploy to learn:
+
+- **`health_path` must be a backend path.** `/` is answered by the static bundle with no container involved, so a healthcheck pointed there passes with the gateway dead.
+- **`sleep_when_idle` must be off.** New backends get it on by default, and scaling to zero drops the WhatsApp WebSocket — the session *is* a long-lived connection, not a request handler.
+- **The env vars come last, and that's fine.** The platform won't accept them for an app with no container, so the first deploy runs unconfigured: it boots healthy with the management API switched off and `/api/ready` naming what's missing. Set them, let it redeploy, and it's live.
+
+No Mongo URL to set — `db_engine=mongo` attaches one and injects `DATABASE_URL`, which the gateway uses when `WA_MONGO_URL` is unset. Leave `WA_MONGO_DB` unset too: the credentials are scoped to the database named in that URL.
 
 Build for the Pi's architecture. Building on the Pi itself is simplest; from x64 or CI you must cross-build:
 
