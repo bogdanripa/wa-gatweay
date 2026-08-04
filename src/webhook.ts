@@ -22,6 +22,17 @@ export class WebhookSender {
     private depth = 0;
     private log;
 
+    /**
+     * Last delivery outcome, surfaced in the console.
+     *
+     * A webhook that fails every time used to be visible only as log lines
+     * nobody reads: the number showed `connected`, the bot received nothing, and
+     * there was no way to tell from the outside which end was broken. This is
+     * the difference between "it's not working" and "it's returning 401".
+     */
+    lastDeliveryAt?: Date;
+    lastFailure?: { at: Date; message: string };
+
     constructor(
         private url: string | undefined,
         private token: string,
@@ -77,9 +88,13 @@ export class WebhookSender {
                     method: "POST",
                     headers: {
                         "content-type": "application/json",
-                        // The bot doesn't check this today, but sending it means it
-                        // *can* verify the caller without another migration.
-                        authorization: `Bearer ${this.token}`,
+                        // Deliberately NOT `Authorization`. A webhook URL often
+                        // points at something that owns that header for its own
+                        // auth — ntfy.sh, for one, reads it and returns 401 for
+                        // any credential it doesn't recognise, which silently
+                        // failed every delivery. The receiver can still verify
+                        // the caller; it just reads a header nobody else claims.
+                        "x-wa-gateway-token": this.token,
                     },
                     body: JSON.stringify(payload),
                     signal: controller.signal,
@@ -88,10 +103,21 @@ export class WebhookSender {
                 clearTimeout(timer);
             }
 
-            if (!res.ok) throw new Error(`webhook returned ${res.status}`);
+            if (!res.ok) {
+                // The body usually explains it far better than the status does —
+                // ntfy's 401 comes with a link to its auth docs, for instance.
+                const detail = (await res.text().catch(() => "")).slice(0, 200).trim();
+                throw new Error(`webhook returned ${res.status}${detail ? `: ${detail}` : ""}`);
+            }
+            this.lastDeliveryAt = new Date();
+            this.lastFailure = undefined;
             this.log.debug({ keys: Object.keys(payload) }, "webhook delivered");
         } catch (e) {
             if (attempt >= MAX_ATTEMPTS) {
+                this.lastFailure = {
+                    at: new Date(),
+                    message: e instanceof Error ? e.message : String(e),
+                };
                 this.log.error({ e, attempt }, "webhook delivery failed, giving up");
                 return;
             }

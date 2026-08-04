@@ -170,9 +170,16 @@
   <h2>Receiving</h2>
   <p>
     Inbound events are <code>POST</code>ed as JSON to the webhook URL you set for that
-    number, with that number's token in the <code>Authorization</code> header so you can
-    verify the caller.
+    number, with that number's token in an <code>X-Wa-Gateway-Token</code> header so you
+    can verify the caller.
   </p>
+  <div class="note">
+    <strong>Not the <code>Authorization</code> header.</strong> A webhook URL often points
+    at something that owns that header for its own authentication — ntfy.sh, for one,
+    reads it and returns <code>401</code> for any credential it doesn't recognise, which
+    fails every delivery. The token goes in <code>X-Wa-Gateway-Token</code>, which nobody
+    else claims.
+  </div>
   <p class="muted">
     The webhook is optional, so you can pair a number before its bot exists. Until one is
     set, inbound events are <strong>discarded, not queued</strong> — otherwise a number

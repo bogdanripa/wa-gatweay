@@ -831,6 +831,8 @@ export class Session {
             lastSentAt: this.lastSentAt,
             messagesReceived: this.messagesReceived,
             webhookBacklog: this.webhook.pending,
+            lastWebhookDeliveryAt: this.webhook.lastDeliveryAt,
+            lastWebhookFailure: this.webhook.lastFailure,
             reconnectAttempts: this.reconnectAttempts,
         };
     }

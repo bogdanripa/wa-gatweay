@@ -172,6 +172,18 @@ function statusNote(n) {
             "Its credentials were wiped. Use “Unlink & re-pair” to get a fresh QR."
         );
     }
+    // A webhook that rejects every delivery is invisible from the outside: the
+    // number reads "connected", the bot receives nothing, and neither end says
+    // which one is broken. Show the actual response.
+    if (n.lastWebhookFailure) {
+        return el("div", { class: "warn-box" },
+            el("strong", { text: "Webhook delivery is failing. " }),
+            `Last attempt ${timeAgo(n.lastWebhookFailure.at)} — ${n.lastWebhookFailure.message}. `,
+            "Messages are reaching this number but not your bot. ",
+            el("em", { text: "If the endpoint uses the Authorization header for its own auth, " +
+                "note the gateway sends its token as X-Wa-Gateway-Token instead." })
+        );
+    }
     // Paired and receiving, with nowhere to send it. Worth saying out loud: the
     // number looks perfectly healthy while every incoming message is dropped.
     if (n.status === "connected" && !n.webhookUrl) {
@@ -418,6 +430,7 @@ function render(payload) {
         const sig =
             JSON.stringify(n) +
             "|" + timeAgo(n.lastMessage?.at) +
+            "|" + timeAgo(n.lastWebhookFailure?.at) +
             (editingId === n.id ? "|editing" : "");
         const cached = cardCache.get(n.id);
         if (cached?.sig === sig) return cached.node;
