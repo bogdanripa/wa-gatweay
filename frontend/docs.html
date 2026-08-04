@@ -128,10 +128,11 @@
   </p>
 
   <div class="note">
-    <strong>Rate limits.</strong> Each number has an outbound cap per minute (20 by
-    default, editable per number in the console). Exceeding it returns
-    <code>502</code> with a message saying so, rather than queueing — it's a backstop
-    against a loop in your bot, not a traffic shaper.
+    <strong>Rate limits.</strong> A number can carry an outbound cap per minute, set
+    per number in the console. There is no default — leave it empty and the number is
+    uncapped. Where a cap exists, exceeding it returns <code>502</code> with a message
+    saying so rather than queueing: it's a backstop against a loop in your bot, not a
+    traffic shaper.
   </div>
 
   <p class="muted">
@@ -171,6 +172,12 @@
     Inbound events are <code>POST</code>ed as JSON to the webhook URL you set for that
     number, with that number's token in the <code>Authorization</code> header so you can
     verify the caller.
+  </p>
+  <p class="muted">
+    The webhook is optional, so you can pair a number before its bot exists. Until one is
+    set, inbound events are <strong>discarded, not queued</strong> — otherwise a number
+    left paired for a week would flood its bot with stale conversation the moment a URL
+    appeared. Sending works throughout.
   </p>
   <p>
     Each request carries <em>one</em> of these arrays. Handle the ones you care about and

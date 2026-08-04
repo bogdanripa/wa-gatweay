@@ -144,6 +144,15 @@ function statusNote(n) {
             "Its credentials were wiped. Use “Unlink & re-pair” to get a fresh QR."
         );
     }
+    // Paired and receiving, with nowhere to send it. Worth saying out loud: the
+    // number looks perfectly healthy while every incoming message is dropped.
+    if (n.status === "connected" && !n.webhookUrl) {
+        return el("div", { class: "warn-box" },
+            el("strong", { text: "No webhook set. " }),
+            "This number is linked and can send, but incoming messages are discarded. " +
+            "Add a webhook URL with “Edit” when the bot is ready for them."
+        );
+    }
     return null;
 }
 
@@ -171,7 +180,12 @@ function editForm(n) {
     },
         el("label", {},
             el("span", { text: "Webhook URL" }),
-            el("input", { name: "webhookUrl", type: "url", value: n.webhookUrl, required: true })
+            el("input", {
+                name: "webhookUrl",
+                type: "url",
+                value: n.webhookUrl || "",
+                placeholder: "none — messages are discarded",
+            })
         ),
         el("label", {},
             el("span", { text: "Pairing phone" }),
@@ -184,8 +198,8 @@ function editForm(n) {
                 type: "number",
                 min: "1",
                 max: "600",
-                value: n.rateIsDefault ? "" : String(n.sendRatePerMinute),
-                placeholder: "default",
+                value: n.sendRatePerMinute ? String(n.sendRatePerMinute) : "",
+                placeholder: "no limit",
             })
         ),
         el("div", { class: "row" },
@@ -289,9 +303,9 @@ function card(n) {
         statusNote(n),
         pairingBlock(n),
         kv("Account", n.me?.id ? `${n.me.id}${n.me.name ? ` (${n.me.name})` : ""}` : "—"),
-        kv("Webhook", n.webhookUrl),
+        kv("Webhook", n.webhookUrl || "not set"),
         kv("Connected since", n.connectedAt ? new Date(n.connectedAt).toLocaleString() : "—"),
-        kv("Send rate", `${n.sendRatePerMinute}/min${n.rateIsDefault ? " (default)" : ""}`),
+        kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
         n.webhookBacklog ? kv("Webhook backlog", String(n.webhookBacklog)) : null,
         n.reconnectAttempts ? kv("Reconnect attempts", String(n.reconnectAttempts)) : null,
         n.lastError ? kv("Last error", n.lastError) : null,

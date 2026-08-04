@@ -357,8 +357,7 @@ export function makeManagementRouter(manager: SessionManager): Router {
         try {
             res.json({
                 numbers: await Promise.all(manager.all().map(present)),
-                defaults: { sendRatePerMinute: config.sendRatePerMinute },
-                // What to set as the bot's WHAPI_BASE_URL, shown in the console so
+                // The base URL to give a bot, shown in the console so
                 // nobody has to reconstruct the /api prefix from memory.
                 apiBaseUrl: `${config.publicUrl}${API_PREFIX}`,
             });

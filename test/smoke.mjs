@@ -153,6 +153,11 @@ try {
     const emptyList = await (await mgmt("/numbers")).json();
     check("management API lists no numbers to begin with", emptyList.numbers.length === 0);
     check(
+        "management API advertises no gateway-wide rate default",
+        emptyList.defaults === undefined,
+        JSON.stringify(emptyList.defaults)
+    );
+    check(
         "management API tells you the bots' base URL, /api prefix included",
         emptyList.apiBaseUrl === `http://127.0.0.1:${PORT}/api`,
         emptyList.apiBaseUrl
@@ -215,6 +220,53 @@ try {
         badRate.status === 400,
         `status=${badRate.status}`
     );
+
+    // --- pair first, configure the webhook later -----------------------------
+    //
+    // Pairing is the slow, physical step. Requiring a webhook URL up front would
+    // block it on a bot that may not exist yet.
+
+    const noWebhook = await mgmt("/numbers", {
+        method: "POST",
+        body: JSON.stringify({ id: "later" }),
+    });
+    const noWebhookJson = await noWebhook.json();
+    check(
+        "a number can be added with no webhook at all",
+        noWebhook.status === 201,
+        `status=${noWebhook.status}`
+    );
+    check(
+        "…and reports the webhook as unset rather than omitting it",
+        noWebhookJson?.number?.webhookUrl === null,
+        JSON.stringify(noWebhookJson?.number?.webhookUrl)
+    );
+    check(
+        "…with no rate cap, since none was given",
+        noWebhookJson?.number?.sendRatePerMinute === null,
+        JSON.stringify(noWebhookJson?.number?.sendRatePerMinute)
+    );
+
+    // Adding one later must not require re-pairing.
+    await mgmt("/numbers/later", {
+        method: "PATCH",
+        body: JSON.stringify({ webhookUrl: "http://127.0.0.1:8792/added-later" }),
+    });
+    const afterAdd = await (await mgmt("/numbers")).json();
+    check(
+        "a webhook can be attached afterwards",
+        afterAdd.numbers.find((n) => n.id === "later")?.webhookUrl === "http://127.0.0.1:8792/added-later"
+    );
+
+    // And removed again by clearing the field.
+    await mgmt("/numbers/later", { method: "PATCH", body: JSON.stringify({ webhookUrl: "" }) });
+    const afterClear = await (await mgmt("/numbers")).json();
+    check(
+        "clearing the webhook unsets it rather than storing an empty string",
+        afterClear.numbers.find((n) => n.id === "later")?.webhookUrl === null
+    );
+
+    await mgmt("/numbers/later", { method: "DELETE" });
 
     const missing = await mgmt("/numbers/nope/restart", { method: "POST" });
     check("acting on an unknown number is a 404", missing.status === 404, `status=${missing.status}`);
@@ -494,12 +546,12 @@ try {
         `exit=${shortKey.code}`
     );
 
-    // NaN used to sail through and silently disable the send rate limiter.
-    const badRate = await bootExpectingExit({ WA_SEND_RATE_PER_MINUTE: "twenty" });
+    // NaN used to sail through here too and silently disable a limit.
+    const badTtl = await bootExpectingExit({ WA_MEDIA_TTL_HOURS: "two days" });
     check(
-        "a non-numeric rate cap refuses to start rather than disabling the limiter",
-        badRate.code === 1 && /must be a positive integer/.test(badRate.out),
-        `exit=${badRate.code}`
+        "a non-numeric media TTL refuses to start rather than breaking the sweep",
+        badTtl.code === 1 && /must be a positive integer/.test(badTtl.out),
+        `exit=${badTtl.code}`
     );
 
     const noMongo = await bootExpectingExit({ WA_MONGO_URL: "", DATABASE_URL: "" });

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { config, type SessionConfig } from "./config.js";
+import type { SessionConfig } from "./config.js";
 import type { SessionDoc, Stores } from "./store.js";
 
 /**
@@ -45,8 +45,18 @@ function validateId(raw: unknown): string {
 /** Normalise an id arriving from a URL path, without asserting it is valid. */
 export const normaliseId = (raw: unknown): string => String(raw ?? "").trim().toLowerCase();
 
-function validateWebhookUrl(raw: unknown): string {
+/**
+ * Optional. A number can be paired before anyone has decided where its events
+ * should go — pairing is the slow, physical step (find the phone, scan a code)
+ * and there is no reason to block it on a URL that doesn't exist yet.
+ *
+ * Until one is set, inbound events are discarded rather than queued. Queueing
+ * them would mean a number paired and forgotten for a week floods its bot with
+ * stale conversation the moment a webhook appears.
+ */
+function validateWebhookUrl(raw: unknown): string | undefined {
     const url = String(raw ?? "").trim();
+    if (!url) return undefined;
     let parsed: URL;
     try {
         parsed = new URL(url);
@@ -73,6 +83,10 @@ function validatePairPhone(raw: unknown): string | undefined {
     return digits;
 }
 
+/**
+ * Optional, and absent means **no cap** rather than some default. There is no
+ * gateway-wide fallback: a limit either exists on the number or it doesn't.
+ */
 function validateRate(raw: unknown): number | undefined {
     if (raw === undefined || raw === null || raw === "") return undefined;
     const n = Number(raw);
@@ -159,7 +173,11 @@ export class SessionStore {
         const $set: Partial<SessionDoc> = { updatedAt: new Date() };
         const $unset: Record<string, ""> = {};
 
-        if (patch.webhookUrl !== undefined) $set.webhookUrl = validateWebhookUrl(patch.webhookUrl);
+        if (patch.webhookUrl !== undefined) {
+            const url = validateWebhookUrl(patch.webhookUrl);
+            if (url) $set.webhookUrl = url;
+            else $unset.webhookUrl = "";
+        }
         if (patch.pairPhone !== undefined) {
             const phone = validatePairPhone(patch.pairPhone);
             if (phone) $set.pairPhone = phone;
@@ -216,7 +234,3 @@ export async function purgeSessionState(stores: Stores, sessionId: string): Prom
     ]);
 }
 
-/** The effective rate cap for a session, for display in the console. */
-export function effectiveRate(doc: SessionDoc): number {
-    return doc.sendRatePerMinute ?? config.sendRatePerMinute;
-}

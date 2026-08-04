@@ -21,7 +21,8 @@ export interface SessionDoc {
     _id: string;
     /** Bearer token the owning bot sends. Unique across sessions. */
     token: string;
-    webhookUrl: string;
+    /** Absent until configured; inbound events are discarded until then. */
+    webhookUrl?: string;
     pairPhone?: string;
     sendRatePerMinute?: number;
     createdAt: Date;

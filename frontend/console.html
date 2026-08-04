@@ -69,9 +69,10 @@
         <small>Namespaces this number's stored credentials. It can never be changed.</small>
       </label>
       <label>
-        <span>Webhook URL</span>
-        <input name="webhookUrl" type="url" placeholder="https://…/webhook" required>
-        <small>The bot's own inbound endpoint. Messages for this number are POSTed here.</small>
+        <span>Webhook URL <span class="muted">(optional)</span></span>
+        <input name="webhookUrl" type="url" placeholder="https://…/webhook">
+        <small>Where messages for this number are POSTed. Leave empty to pair now and
+          set it later — incoming messages are discarded until you do.</small>
       </label>
       <label>
         <span>Pairing phone <span class="muted">(optional)</span></span>
@@ -80,8 +81,8 @@
       </label>
       <label>
         <span>Send rate / minute <span class="muted">(optional)</span></span>
-        <input name="sendRatePerMinute" type="number" min="1" max="600" placeholder="default">
-        <small>Ceiling on outbound messages. Leave empty to use the gateway default.</small>
+        <input name="sendRatePerMinute" type="number" min="1" max="600" placeholder="no limit">
+        <small>Ceiling on outbound messages. Leave empty for no limit.</small>
       </label>
       <button type="submit">Add number</button>
     </form>

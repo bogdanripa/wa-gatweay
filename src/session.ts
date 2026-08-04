@@ -32,7 +32,14 @@ export type SessionStatus =
     | "conflict"
     | "stopped";
 
-/** Simple token bucket. A floor under any bug that would otherwise spam a chat. */
+/**
+ * Simple token bucket, and entirely optional — a number with no
+ * `sendRatePerMinute` gets no limiter at all rather than a default one.
+ *
+ * Where there is one, it is a floor under any bug that would otherwise spam a
+ * chat: WhatsApp bans on volume, and a retry loop is much cheaper to survive
+ * than a lost number.
+ */
 class RateLimiter {
     private tokens: number;
     private last = Date.now();
@@ -67,7 +74,8 @@ export class Session {
     private saveCreds: () => Promise<void> = async () => {};
     private clearAuth: () => Promise<void> = async () => {};
     private groupCache = new Map<string, { meta: GroupMetadata; at: number }>();
-    private limiter: RateLimiter;
+    /** Absent when this number has no cap configured. */
+    private limiter?: RateLimiter;
     private webhook: WebhookSender;
     private log;
     private reconnectAttempts = 0;
@@ -92,7 +100,7 @@ export class Session {
         this.id = cfg.id;
         this.token = cfg.token;
         this.log = logger.child({ session: cfg.id });
-        this.limiter = new RateLimiter(cfg.sendRatePerMinute ?? config.sendRatePerMinute);
+        this.limiter = cfg.sendRatePerMinute ? new RateLimiter(cfg.sendRatePerMinute) : undefined;
         this.webhook = new WebhookSender(cfg.webhookUrl, cfg.token, cfg.id);
     }
 
@@ -109,7 +117,7 @@ export class Session {
         if (cfg.id !== this.id) throw new Error("a session's id cannot change");
         this.cfg = cfg;
         this.token = cfg.token;
-        this.limiter = new RateLimiter(cfg.sendRatePerMinute ?? config.sendRatePerMinute);
+        this.limiter = cfg.sendRatePerMinute ? new RateLimiter(cfg.sendRatePerMinute) : undefined;
         this.webhook.retarget(cfg.webhookUrl, cfg.token);
     }
 
@@ -525,7 +533,8 @@ export class Session {
     }
 
     private guardRate() {
-        if (!this.limiter.tryTake()) {
+        // No limiter means this number is uncapped, by configuration.
+        if (this.limiter && !this.limiter.tryTake()) {
             throw new Error(`send rate limit exceeded for session "${this.id}"`);
         }
     }
@@ -744,10 +753,11 @@ export class Session {
         return {
             ...this.describe(),
             token: this.token,
-            webhookUrl: this.cfg.webhookUrl,
+            // null rather than absent, so the console can tell "not set" from
+            // "the API forgot to send it".
+            webhookUrl: this.cfg.webhookUrl ?? null,
             pairPhone: this.cfg.pairPhone,
-            sendRatePerMinute: this.cfg.sendRatePerMinute ?? config.sendRatePerMinute,
-            rateIsDefault: this.cfg.sendRatePerMinute === undefined,
+            sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
             me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,

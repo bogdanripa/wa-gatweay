@@ -38,13 +38,17 @@ function positiveInt(name: string, fallback: number): number {
 export interface SessionConfig {
     /** Stable identifier. Used to namespace all stored state — never change it. */
     id: string;
-    /** Bearer token. Set the matching bot's WHAPI_TOKEN to this value. */
+    /** Bearer token the owning bot sends. */
     token: string;
-    /** Where this number's inbound events go — its own bot's /whapi endpoint. */
-    webhookUrl: string;
+    /**
+     * Where this number's inbound events go. Absent until one is configured —
+     * a number can be paired before anyone has decided where its events belong,
+     * and events are discarded (not queued) in the meantime.
+     */
+    webhookUrl?: string;
     /** Optional: pair with an 8-char code instead of a QR. Digits only. */
     pairPhone?: string;
-    /** Optional per-session override of the global send rate cap. */
+    /** Outbound cap per minute. Absent means no cap at all. */
     sendRatePerMinute?: number;
 }
 
@@ -166,9 +170,6 @@ export const config = {
     /** How long downloaded media stays fetchable before cleanup. */
     mediaTtlHours: positiveInt("WA_MEDIA_TTL_HOURS", 48),
     mediaDir: optional("WA_MEDIA_DIR", "/tmp/wa-media"),
-
-    /** Default outbound cap per session, per minute. Overridable per session. */
-    sendRatePerMinute: positiveInt("WA_SEND_RATE_PER_MINUTE", 20),
 
     logLevel: optional("WA_LOG_LEVEL", "info"),
 };

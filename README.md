@@ -72,7 +72,11 @@ docker buildx build --platform linux/arm64 -t <registry>/wa-gateway:latest --pus
 
 ### Adding a number
 
-Open the console at `https://wa-gateway-coolify.bogdanripa.com/`, enter the management key, and fill in **Add a number**: an id, and the bot's own `/whapi` webhook URL. A token is generated and shown once — set the bot's `WHAPI_TOKEN` to it — and a pairing QR appears on the new card straight away.
+Open the console at `https://wa-gateway-coolify.bogdanripa.com/`, enter the management key, and fill in **Add a number**. Only the id is required: a token is generated and shown once, and a pairing QR appears on the new card straight away.
+
+The webhook URL is optional, because pairing is the slow physical step and there's no reason to block it on a bot that doesn't exist yet. Add it later with **Edit**; until then the number can send, and inbound events are discarded rather than queued — a number left paired for a week shouldn't flood its bot with stale conversation the moment a URL appears.
+
+The send rate cap is optional too, and empty means **no limit** rather than some default.
 
 No redeploy, no environment variable, no restart. Budget roughly 40–80 MB of RAM per number, depending on how many groups it's in.
 
@@ -189,6 +193,6 @@ That starts an in-memory mongod, the real gateway, and a local stand-in for Piro
 
 ## The obvious caveat
 
-This is a reverse-engineered client and against WhatsApp's Terms of Service. Baileys' own maintainers discourage bulk or automated messaging. A personal bot on your own number in your own groups is the lowest-risk profile there is, and the per-session rate limiter keeps a bug from turning into a ban. Don't point this at cold outreach.
+This is a reverse-engineered client and against WhatsApp's Terms of Service. Baileys' own maintainers discourage bulk or automated messaging. A personal bot on your own number in your own groups is the lowest-risk profile there is, and a per-number rate cap is available to keep a bug from turning into a ban. Don't point this at cold outreach.
 
 WhatsApp also ships protocol changes that break Baileys periodically. Pin the version, and expect to bump it a few times a year. Note that with several numbers on one instance, a breaking change takes them all down at once.

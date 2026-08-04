@@ -23,7 +23,7 @@ export class WebhookSender {
     private log;
 
     constructor(
-        private url: string,
+        private url: string | undefined,
         private token: string,
         sessionId: string
     ) {
@@ -37,13 +37,22 @@ export class WebhookSender {
      * ordering guarantee above only holds because that queue is never discarded —
      * anything already enqueued is delivered to the new target, in order.
      */
-    retarget(url: string, token: string) {
+    retarget(url: string | undefined, token: string) {
         this.url = url;
         this.token = token;
     }
 
     /** Enqueue a payload. Resolves once this payload has been attempted. */
     send(payload: Record<string, any>): Promise<void> {
+        // A number can be paired before its webhook is configured. Discard, don't
+        // queue: holding events until a URL appears would mean a number paired
+        // and left alone for a week floods its bot with stale conversation the
+        // moment someone sets one, and the bots act on what they receive.
+        if (!this.url) {
+            this.log.debug({ keys: Object.keys(payload) }, "no webhook configured, event discarded");
+            return Promise.resolve();
+        }
+
         this.depth++;
         const task = this.queue.then(() => this.deliver(payload)).finally(() => {
             this.depth--;
@@ -64,7 +73,7 @@ export class WebhookSender {
             const timer = setTimeout(() => controller.abort(), 30_000);
             let res: Response;
             try {
-                res = await fetch(this.url, {
+                res = await fetch(this.url!, {
                     method: "POST",
                     headers: {
                         "content-type": "application/json",
