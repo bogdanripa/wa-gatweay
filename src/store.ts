@@ -26,6 +26,19 @@ export interface SessionDoc {
     pairPhone?: string;
     sendRatePerMinute?: number;
     /**
+     * The analogue of Meta's `phone_number_id`: a stable, numeric, per-number
+     * id. Minted at creation rather than derived from the linked phone, because
+     * clients need it before the number is paired — and because Meta's is
+     * likewise unrelated to the display number.
+     */
+    phoneNumberId: string;
+    /**
+     * Which dialect this number's webhook speaks. `cloud` mirrors Meta's Cloud
+     * API envelope; `whapi` is the older shape, kept for bots written against
+     * it. This is the one direction the two cannot both be true at once.
+     */
+    webhookFormat: "cloud" | "whapi";
+    /**
      * Last inbound message seen, persisted so a redeploy doesn't reset the
      * console's "is this working?" line to "never". Written at most once a
      * minute — it is a display marker, not an audit log.

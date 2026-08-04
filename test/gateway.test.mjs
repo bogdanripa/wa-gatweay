@@ -18,6 +18,12 @@ import {
     classify,
     unwrap,
 } from "../dist/map.js";
+import {
+    buildCloudGroupEvent,
+    buildCloudMessageEvent,
+    buildCloudSendResponse,
+    parseCloudSendRequest,
+} from "../dist/cloud.js";
 
 const GROUP = "120363012345678901@g.us";
 const USER = "40750271099@s.whatsapp.net";
@@ -364,4 +370,189 @@ test("a resolved sender reaches gepetel as real phone digits", () => {
     assert.equal(toWhapiUserId(resolved), "40750271099");
     // And the country prefix gepetel keys off is now the right one.
     assert.ok(toWhapiUserId(resolved).startsWith("40"));
+});
+
+// ---------------------------------------------------------------------------
+// WhatsApp Cloud API compatibility.
+//
+// These assert against shapes taken from Meta's own documentation, not against
+// this code — the whole promise is that a client written for the Cloud API
+// keeps working after a base-URL change, and only Meta's shapes can prove that.
+
+const CLOUD_META = {
+    displayPhoneNumber: "15550783881",
+    phoneNumberId: "106540352242922",
+    businessAccountId: "102290129340398",
+};
+
+test("Meta's documented text body parses", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: "+16505551234",
+        type: "text",
+        text: { preview_url: true, body: "Does it come in another color?" },
+    });
+    assert.equal(req.to, "+16505551234");
+    assert.equal(req.recipientType, "individual");
+    assert.deepEqual(req.kind, {
+        type: "text",
+        body: "Does it come in another color?",
+        previewUrl: true,
+    });
+});
+
+test("recipient_type group is carried through", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        recipient_type: "group",
+        to: GROUP,
+        type: "text",
+        text: { body: "hi" },
+    });
+    assert.equal(req.recipientType, "group");
+});
+
+test("a wrong messaging_product is refused, as Meta refuses it", () => {
+    assert.throws(
+        () => parseCloudSendRequest({ to: "1", type: "text", text: { body: "x" } }),
+        /messaging_product/
+    );
+});
+
+test("mark-as-read carries no recipient", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: "wamid.HBgL",
+    });
+    assert.deepEqual(req.kind, { type: "read", messageId: "wamid.HBgL", typing: false });
+});
+
+test("a typing indicator rides along with the read receipt, as Meta models it", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: "wamid.HBgL",
+        typing_indicator: { type: "text" },
+    });
+    assert.equal(req.kind.typing, true);
+});
+
+test("media accepts link or id", () => {
+    assert.equal(
+        parseCloudSendRequest({
+            messaging_product: "whatsapp", to: "1", type: "image",
+            image: { link: "https://x/cat.png", caption: "c" },
+        }).kind.media,
+        "https://x/cat.png"
+    );
+    assert.equal(
+        parseCloudSendRequest({
+            messaging_product: "whatsapp", to: "1", type: "image", image: { id: "123" },
+        }).kind.media,
+        "123"
+    );
+});
+
+test("the send response matches Meta's envelope", () => {
+    const res = buildCloudSendResponse("+16505551234", "16505551234", "wamid.X");
+    assert.deepEqual(res, {
+        messaging_product: "whatsapp",
+        contacts: [{ input: "+16505551234", wa_id: "16505551234" }],
+        messages: [{ id: "wamid.X" }],
+    });
+});
+
+test("an inbound DM matches Meta's webhook nesting exactly", () => {
+    const event = buildCloudMessageEvent(
+        { key: { id: "wamid.ABC", remoteJid: USER }, messageTimestamp: 1749416383 },
+        { kind: "text", text: "Hello" },
+        { chatJid: USER, senderJid: USER, senderName: "Sheena Nelson" },
+        CLOUD_META
+    );
+    assert.equal(event.object, "whatsapp_business_account");
+    assert.equal(event.entry[0].id, CLOUD_META.businessAccountId);
+    const change = event.entry[0].changes[0];
+    assert.equal(change.field, "messages");
+    assert.equal(change.value.messaging_product, "whatsapp");
+    assert.deepEqual(change.value.metadata, {
+        display_phone_number: "15550783881",
+        phone_number_id: "106540352242922",
+    });
+    assert.deepEqual(change.value.contacts, [
+        { profile: { name: "Sheena Nelson" }, wa_id: "40750271099" },
+    ]);
+    const msg = change.value.messages[0];
+    assert.deepEqual(msg, {
+        from: "40750271099",
+        id: "wamid.ABC",
+        // Meta sends the timestamp as a STRING; clients parse it as one.
+        timestamp: "1749416383",
+        type: "text",
+        text: { body: "Hello" },
+    });
+});
+
+test("a group message carries group_id, with the participant in from", () => {
+    const event = buildCloudMessageEvent(
+        { key: { id: "wamid.G", remoteJid: GROUP, participant: USER }, messageTimestamp: 1 },
+        { kind: "text", text: "yo" },
+        { chatJid: GROUP, senderJid: USER, chatName: "Team", senderName: "Bogdan" },
+        CLOUD_META
+    );
+    const msg = event.entry[0].changes[0].value.messages[0];
+    assert.equal(msg.group_id, GROUP);
+    assert.equal(msg.from, "40750271099");
+});
+
+test("a DM has no group_id at all, rather than a null one", () => {
+    const event = buildCloudMessageEvent(
+        { key: { id: "m", remoteJid: USER }, messageTimestamp: 1 },
+        { kind: "text", text: "x" },
+        { chatJid: USER, senderJid: USER },
+        CLOUD_META
+    );
+    assert.ok(!("group_id" in event.entry[0].changes[0].value.messages[0]));
+});
+
+test("a voice note is an audio message flagged voice, as Meta types it", () => {
+    const event = buildCloudMessageEvent(
+        { key: { id: "m", remoteJid: USER }, messageTimestamp: 1 },
+        { kind: "voice", mediaKind: "voice" },
+        { chatJid: USER, senderJid: USER },
+        CLOUD_META,
+        { link: "https://x/a.ogg" }
+    );
+    const msg = event.entry[0].changes[0].value.messages[0];
+    assert.equal(msg.type, "audio");
+    assert.equal(msg.audio.voice, true);
+    assert.equal(msg.audio.link, "https://x/a.ogg");
+});
+
+test("a GIF becomes a video, because Meta has no gif type", () => {
+    const event = buildCloudMessageEvent(
+        { key: { id: "m", remoteJid: USER }, messageTimestamp: 1 },
+        { kind: "gif", mediaKind: "gif", caption: "lol" },
+        { chatJid: USER, senderJid: USER },
+        CLOUD_META,
+        { link: "https://x/g.mp4" }
+    );
+    assert.equal(event.entry[0].changes[0].value.messages[0].type, "video");
+});
+
+test("skipped classifications produce no cloud event either", () => {
+    assert.equal(
+        buildCloudMessageEvent({ key: {} }, { kind: "skip" }, { chatJid: USER, senderJid: USER }, CLOUD_META),
+        null
+    );
+});
+
+test("group participant events use Meta's group_participants_update field", () => {
+    const event = buildCloudGroupEvent(GROUP, "Team", [{ id: USER, name: "Bogdan" }], CLOUD_META);
+    assert.equal(event.entry[0].changes[0].field, "group_participants_update");
+    const group = event.entry[0].changes[0].value.groups[0];
+    assert.equal(group.group_id, GROUP);
+    assert.equal(group.subject, "Team");
+    assert.deepEqual(group.participants, [{ wa_id: "40750271099", name: "Bogdan" }]);
 });

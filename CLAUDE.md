@@ -68,6 +68,14 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 
 **Connection alerts must stay quiet to stay useful.** `alerts.ts` deliberately does *not* fire on every disconnect: WhatsApp drops sockets constantly and Baileys reconnects within seconds, so a naive alert-on-close trains the operator to ignore it within an hour. The grace period, the immediate path for `logged-out`/`conflict`, and the "never connected is not an incident" rule are the whole point — don't simplify them away. A failed alert must never take down the thing it is watching, which is why every send is caught.
 
+**Two outbound dialects, one webhook dialect per number.** `cloud.ts` implements Meta's WhatsApp Cloud API shapes; `map.ts` implements the older whapi ones. Sending supports both permanently — they're different routes, so there's no conflict. The webhook direction can only be one shape at a time, hence `SessionDoc.webhookFormat`, defaulting to `cloud` for new numbers and backfilled to `whapi` for numbers that predate it (they were paired against a bot that speaks it).
+
+`cloud.ts` is pure for the same reason `map.ts` is, and its tests assert against shapes lifted from Meta's own documentation — not against this code. That is the only thing that can prove the migration promise.
+
+The Cloud route's path segment (`/<PHONE_NUMBER_ID>/messages`) is deliberately **not** used for routing: the token already identifies one number, which is what makes migrating a base-URL change. It is still checked against *other* numbers' identifiers, because a segment naming a different configured number is a real misconfiguration rather than a harmless one.
+
+Meta's group support is narrower than it looks — its Groups API only addresses groups the business created, with the business as admin. We use its *format* and apply it to any group the linked number is in. Don't "fix" the docs to claim parity.
+
 **The management key is the keys to every number.** It creates sessions, reads every bot's token, and can unlink an account — from the public internet. Compare it in constant time, keep the failed-attempt throttle, and don't let a session token reach `/api/mgmt/*` (a compromised bot must not be able to enumerate the others). `trust proxy` is set for the throttle's benefit: without it every request looks like it came from Pironman's proxy and one attacker locks out the operator.
 
 **`messages.upsert` type.** Only `"notify"` is a live message. `"append"` is history backfill — forwarding it makes bots reply to week-old messages.

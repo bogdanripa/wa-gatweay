@@ -22,12 +22,23 @@ import {
     unwrap,
 } from "./map.js";
 import {
+    buildCloudContactsEvent,
+    buildCloudGroupEvent,
+    buildCloudMessageEvent,
+    buildCloudPollEvent,
+    CloudRequestError,
+    type CloudMetadata,
+    type CloudSendKind,
+    type CloudSendRequest,
+} from "./cloud.js";
+import {
     digitsOf,
     isGroupJid,
     isLidJid,
     preferPhoneNumber,
     stripDevice,
     toWaJid,
+    toWhapiChatId,
     toWhapiUserId,
 } from "./jid.js";
 
@@ -546,14 +557,16 @@ export class Session {
             isGroup,
         });
 
-        const payload = buildWhapiMessage(
-            msg,
-            cls,
-            { chatJid, senderJid, chatName, senderName: msg.pushName || undefined },
-            media
-        );
-        if (!payload) return;
+        const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined };
 
+        if (this.cfg.webhookFormat === "cloud") {
+            const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
+            if (event) await this.webhook.send(event);
+            return;
+        }
+
+        const payload = buildWhapiMessage(msg, cls, ids, media);
+        if (!payload) return;
         await this.webhook.send({ messages: [payload] });
     }
 
@@ -566,6 +579,19 @@ export class Session {
      * useful signal; the sender and chat make it recognisable, so you can match
      * it against a message you just sent yourself.
      */
+    /**
+     * Meta's `metadata` block. `businessAccountId` reuses the phone number id —
+     * there is no WhatsApp Business Account here to have an id of its own, and
+     * clients only ever echo it back.
+     */
+    private cloudMeta(): CloudMetadata {
+        return {
+            displayPhoneNumber: digitsOf(this.me?.id) || "",
+            phoneNumberId: this.cfg.phoneNumberId,
+            businessAccountId: this.cfg.phoneNumberId,
+        };
+    }
+
     private noteInbound(m: { from: string; fromName?: string; chatName?: string; isGroup: boolean }) {
         this.lastMessage = { at: new Date(), ...m };
         this.messagesReceived++;
@@ -607,11 +633,21 @@ export class Session {
                     }))
                 );
 
-                await this.webhook.send({
-                    messages_updates: [
-                        buildWhapiPollUpdate(u.key.id, stored.remoteJid, stored.name, resolved),
-                    ],
-                });
+                await this.webhook.send(
+                    this.cfg.webhookFormat === "cloud"
+                        ? buildCloudPollEvent(
+                              u.key.id,
+                              stored.remoteJid,
+                              stored.name,
+                              resolved,
+                              this.cloudMeta()
+                          )
+                        : {
+                              messages_updates: [
+                                  buildWhapiPollUpdate(u.key.id, stored.remoteJid, stored.name, resolved),
+                              ],
+                          }
+                );
             } catch (e) {
                 this.log.error({ e, id: u.key?.id }, "poll update handling failed");
             }
@@ -651,9 +687,11 @@ export class Session {
         try {
             const meta = known || (await this.getGroupMetadata(jid));
             const participants = await this.groupParticipantIds(meta);
-            await this.webhook.send({
-                groups: [buildWhapiGroupEvent(jid, meta.subject, participants)],
-            });
+            await this.webhook.send(
+                this.cfg.webhookFormat === "cloud"
+                    ? buildCloudGroupEvent(jid, meta.subject, participants, this.cloudMeta())
+                    : { groups: [buildWhapiGroupEvent(jid, meta.subject, participants)] }
+            );
         } catch (e) {
             this.log.error({ e, jid }, "failed to emit group event");
         }
@@ -688,7 +726,12 @@ export class Session {
         // that grows a long-lived process out of memory.
         if (this.emittedContacts.size > 5000) this.emittedContacts.clear();
 
-        if (payload.length) await this.webhook.send({ contacts: payload });
+        if (!payload.length) return;
+        await this.webhook.send(
+            this.cfg.webhookFormat === "cloud"
+                ? buildCloudContactsEvent(payload, this.cloudMeta())
+                : { contacts: payload }
+        );
     }
 
     // ----------------------------------------------------------------- outbound
@@ -705,6 +748,102 @@ export class Session {
         if (this.limiter && !this.limiter.tryTake()) {
             throw new Error(`send rate limit exceeded for session "${this.id}"`);
         }
+    }
+
+    /**
+     * Does this string address this number?
+     *
+     * Used only to catch a client posting to `/<some-other-number-id>/messages`
+     * with this number's token — the token is what routes, so an unrecognised
+     * segment is fine and ignored, but one belonging to a *different* number is
+     * a misconfiguration that would otherwise send from the wrong account.
+     */
+    matchesAddress(value: string): boolean {
+        const v = String(value || "").trim().toLowerCase();
+        if (!v) return false;
+        return (
+            v === this.id ||
+            v === this.cfg.phoneNumberId ||
+            (!!this.me?.id && digitsOf(this.me.id) === digitsOf(v))
+        );
+    }
+
+    /**
+     * Send in Cloud API terms. Returns the wa_id Meta's response echoes back —
+     * the group id for a group, the recipient's digits otherwise.
+     */
+    async sendCloud(req: CloudSendRequest): Promise<{ messageId?: string; waId: string }> {
+        const k = req.kind;
+
+        // A status update carries no recipient at all.
+        if (k.type === "read") {
+            await this.markRead(k.messageId);
+            if (k.typing) {
+                const key = await this.recallKey(k.messageId);
+                if (key) await this.sendPresence(key.remoteJid, "typing");
+            }
+            return { messageId: k.messageId, waId: "" };
+        }
+
+        const jid = toWaJid(req.to);
+        if (!jid) {
+            throw new CloudRequestError(
+                "(#100) Missing or invalid parameter: to",
+                100,
+                `"${req.to}" is not a phone number or group id this gateway can route to.`
+            );
+        }
+        const waId = isGroupJid(jid) ? toWhapiChatId(jid) : toWhapiUserId(jid);
+
+        switch (k.type) {
+            case "text": {
+                const sent = await this.sendText(req.to, k.body);
+                return { messageId: sent.id, waId };
+            }
+            case "image": {
+                const sent = await this.sendImage(req.to, k.media, k.caption);
+                return { messageId: sent.id, waId };
+            }
+            case "reaction": {
+                await this.react(k.messageId, k.emoji);
+                return { messageId: k.messageId, waId };
+            }
+            case "audio":
+            case "video":
+            case "document":
+            case "sticker":
+            case "location": {
+                const sent = await this.sendCloudMedia(jid, k);
+                return { messageId: sent.id, waId };
+            }
+        }
+    }
+
+    /** The media and location kinds that have no whapi-shaped equivalent. */
+    private async sendCloudMedia(
+        jid: string,
+        k: Extract<CloudSendKind, { type: "audio" | "video" | "document" | "sticker" | "location" }>
+    ): Promise<{ id?: string }> {
+        const sock = this.assertReady();
+        this.guardRate();
+
+        let content: any;
+        if (k.type === "location") {
+            content = { location: { degreesLatitude: k.latitude, degreesLongitude: k.longitude, name: k.name, address: k.address } };
+        } else {
+            const media = k.media.startsWith("http://") || k.media.startsWith("https://")
+                ? { url: k.media }
+                : Buffer.from(k.media.startsWith("data:") ? k.media.split(",")[1] ?? "" : k.media, "base64");
+            if (k.type === "audio") content = { audio: media, mimetype: "audio/mp4" };
+            else if (k.type === "video") content = { video: media, caption: k.caption };
+            else if (k.type === "sticker") content = { sticker: media };
+            else content = { document: media, caption: k.caption, fileName: k.filename || "file" };
+        }
+
+        const sent = await sock.sendMessage(jid, content as any);
+        this.lastSentAt = new Date();
+        if (sent) await this.rememberKey(sent);
+        return { id: sent?.key?.id || undefined };
     }
 
     async sendText(to: string, body: string): Promise<{ id?: string }> {
@@ -944,6 +1083,8 @@ export class Session {
             // null rather than absent, so the console can tell "not set" from
             // "the API forgot to send it".
             webhookUrl: this.cfg.webhookUrl ?? null,
+            phoneNumberId: this.cfg.phoneNumberId,
+            webhookFormat: this.cfg.webhookFormat,
             pairPhone: this.cfg.pairPhone,
             sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
             me: this.me,

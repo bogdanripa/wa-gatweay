@@ -204,6 +204,7 @@ function editForm(n) {
             const patch = {
                 webhookUrl: data.get("webhookUrl"),
                 sendRatePerMinute: data.get("sendRatePerMinute"),
+                webhookFormat: data.get("webhookFormat"),
             };
             // Only sent when the field was actually rendered. It is hidden for a
             // linked number, and an absent field reads as an empty string —
@@ -252,6 +253,22 @@ function editForm(n) {
                         "account this session controls. Leave empty to scan a QR instead.",
                 })
               ),
+        el("label", {},
+            el("span", { text: "Webhook format" }),
+            (() => {
+                const sel = el("select", { name: "webhookFormat" },
+                    el("option", { value: "cloud", text: "WhatsApp Cloud API" }),
+                    el("option", { value: "whapi", text: "whapi (legacy)" })
+                );
+                sel.value = n.webhookFormat || "cloud";
+                return sel;
+            })(),
+            el("small", {
+                text:
+                    "The shape of the JSON posted to your webhook. Cloud matches Meta's " +
+                    "envelope; whapi is the older format, for bots written against it.",
+            })
+        ),
         el("label", {},
             el("span", { text: "Send rate / minute" }),
             el("input", {
@@ -375,7 +392,11 @@ function card(n) {
                   )
                 : "none yet"
         ),
+        kv("Phone number ID", n.phoneNumberId),
         kv("Webhook", n.webhookUrl || "not set"),
+        kv("Webhook format", n.webhookFormat === "cloud"
+            ? "WhatsApp Cloud API"
+            : "whapi (legacy)"),
         kv("Connected since", n.connectedAt ? new Date(n.connectedAt).toLocaleString() : "—"),
         kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
         n.webhookBacklog ? kv("Webhook backlog", String(n.webhookBacklog)) : null,

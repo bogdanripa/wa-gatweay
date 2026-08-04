@@ -24,6 +24,7 @@
   <a href="#webhook">Receiving</a>
   <a href="#status">Status</a>
   <a href="#manage">Managing numbers</a>
+  <a href="#differences">Differences from Meta</a>
 </nav>
 
 <!-- ------------------------------------------------------------------ -->
@@ -39,11 +40,36 @@
     with WhatsApp → Settings → Linked devices. The console shows a token for that
     number — that token is how you address it.
   </p>
-  <p>Then say hello:</p>
-  <pre><code>curl -X POST <span class="b">$BASE</span>/messages/text \
+  <div class="note">
+    <strong>Coming from the WhatsApp Business Cloud API?</strong> Change your base URL to
+    the one above and stop. The request bodies, the response envelope and the webhook
+    payloads are Meta's — your existing code keeps working. See
+    <a href="#differences">differences from Meta</a> for the short list of what is not
+    the same, all of which is this gateway being <em>less</em> restricted.
+  </div>
+
+  <p>Then say hello — this is Meta's exact request:</p>
+  <pre><code>curl -X POST <span class="b">$BASE</span>/<span class="b">$PHONE_NUMBER_ID</span>/messages \
   -H "Authorization: Bearer <span class="b">$TOKEN</span>" \
   -H "Content-Type: application/json" \
-  -d '{"to": "40750271099", "body": "Hello from wa-gateway"}'</code></pre>
+  -d '{
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "40750271099",
+    "type": "text",
+    "text": { "body": "Hello from wa-gateway" }
+  }'</code></pre>
+  <pre><code>→ {
+  "messaging_product": "whatsapp",
+  "contacts": [ { "input": "40750271099", "wa_id": "40750271099" } ],
+  "messages": [ { "id": "3EB0..." } ]
+}</code></pre>
+  <p class="muted">
+    <code>$PHONE_NUMBER_ID</code> is shown on the number's card in the console. The path
+    segment is accepted but not used for routing — the token already identifies exactly
+    one number — so an existing Cloud API URL works verbatim, and so does the number's
+    own id. What it will not do is let one number's token send from another's.
+  </p>
 </section>
 
 <!-- ------------------------------------------------------------------ -->
@@ -71,73 +97,67 @@
   <h2>Sending</h2>
 
   <p>
-    <code>to</code> accepts whatever you have: bare digits with the country code
-    (<code>40750271099</code>), a full JID (<code>40750271099@s.whatsapp.net</code>), or a
-    group id (<code>120363012345678901@g.us</code>).
+    Every message is a <code>POST</code> to <code>/&lt;PHONE_NUMBER_ID&gt;/messages</code>
+    with <code>messaging_product: "whatsapp"</code> and a <code>type</code>, exactly as
+    Meta specifies. <code>to</code> takes a phone number with country code, or a group id
+    with <code>recipient_type: "group"</code>.
   </p>
 
   <h3>Text</h3>
-  <pre><code><span class="m">POST</span> /messages/text
-{ "to": "40750271099", "body": "Hello" }
+  <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "individual",
+  "to": "40750271099", "type": "text",
+  "text": { "preview_url": false, "body": "Hello" } }</code></pre>
 
-→ { "sent": true, "message": { "id": "3EB0..." } }</code></pre>
+  <h3>To a group</h3>
+  <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
+  "to": "120363012345678901@g.us", "type": "text",
+  "text": { "body": "Hello everyone" } }</code></pre>
+  <p class="muted">
+    Any group the linked number belongs to. Meta's Groups API only addresses groups the
+    business itself created — see <a href="#differences">differences</a>.
+  </p>
 
-  <h3>Image</h3>
-  <p><code>media</code> is an <code>https://</code> URL, a <code>data:</code> URI, or raw base64.</p>
-  <pre><code><span class="m">POST</span> /messages/image
-{ "to": "40750271099", "media": "https://…/cat.png", "caption": "optional" }
+  <h3>Media</h3>
+  <p><code>link</code> takes an https URL, a <code>data:</code> URI, or raw base64.</p>
+  <pre><code>{ … "type": "image",    "image":    { "link": "https://…/cat.png", "caption": "optional" } }
+{ … "type": "video",    "video":    { "link": "https://…/clip.mp4", "caption": "optional" } }
+{ … "type": "audio",    "audio":    { "link": "https://…/note.ogg" } }
+{ … "type": "sticker",  "sticker":  { "link": "https://…/s.webp" } }
+{ … "type": "document", "document": { "link": "https://…/f.pdf", "filename": "f.pdf" } }</code></pre>
 
-→ { "sent": true, "message": { "id": "3EB0..." } }</code></pre>
-
-  <h3>Poll</h3>
-  <p>A real WhatsApp poll. Vote tallies arrive later on your webhook — see <a href="#poll-updates">poll updates</a>.</p>
-  <pre><code><span class="m">POST</span> /messages/poll
-{
-  "to": "120363012345678901@g.us",
-  "poll": {
-    "name": "Lunch?",
-    "options": ["Pizza", "Sushi", "Neither"],
-    "allow_multiple_answers": false
-  }
-}
-
-→ { "sent": true, "message": { "id": "3EB0..." }, "id": "3EB0..." }</code></pre>
+  <h3>Location</h3>
+  <pre><code>{ … "type": "location",
+  "location": { "latitude": 44.4268, "longitude": 26.1025,
+                "name": "Bucharest", "address": "Romania" } }</code></pre>
 
   <h3>Reaction</h3>
-  <pre><code><span class="m">PUT</span> /messages/&lt;message-id&gt;/reaction
-{ "emoji": "👍" }        // "" removes your reaction
+  <pre><code>{ … "type": "reaction",
+  "reaction": { "message_id": "3EB0…", "emoji": "👍" } }   // "" removes it</code></pre>
 
-→ { "sent": true }</code></pre>
+  <h3>Mark as read, and typing</h3>
+  <p>A status update, not a message — so it carries no <code>to</code>, same as Meta.</p>
+  <pre><code>{ "messaging_product": "whatsapp", "status": "read", "message_id": "3EB0…" }
 
-  <h3>Mark as read</h3>
-  <pre><code><span class="m">PUT</span> /messages/&lt;message-id&gt;
-{ "status": "read" }
+// with a typing indicator, as Meta models it
+{ "messaging_product": "whatsapp", "status": "read", "message_id": "3EB0…",
+  "typing_indicator": { "type": "text" } }</code></pre>
 
-→ { "sent": true }</code></pre>
-
-  <h3>Typing indicator</h3>
-  <pre><code><span class="m">PUT</span> /presences/&lt;to&gt;
-{ "presence": "typing" }   // typing | recording | paused | available
-
-→ { "sent": true }</code></pre>
-
-  <p class="muted">
-    Message ids in the two <code>PUT</code> calls are ids the gateway has seen — one it
-    gave you from a send, or one that arrived on your webhook. They're remembered for a
-    week.
-  </p>
+  <h3>Errors</h3>
+  <p>Meta's error envelope, so existing error handling keeps matching:</p>
+  <pre><code>{ "error": { "message": "(#100) Missing or invalid parameter: text.body",
+             "type": "OAuthException", "code": 100,
+             "error_data": { "details": "text.body must be a non-empty string." } } }</code></pre>
 
   <div class="note">
     <strong>Rate limits.</strong> A number can carry an outbound cap per minute, set
     per number in the console. There is no default — leave it empty and the number is
-    uncapped. Where a cap exists, exceeding it returns <code>502</code> with a message
-    saying so rather than queueing: it's a backstop against a loop in your bot, not a
-    traffic shaper.
+    uncapped. Where a cap exists, exceeding it returns <code>502</code> rather than
+    queueing: it's a backstop against a loop in your bot, not a traffic shaper.
   </div>
 
   <p class="muted">
-    Not supported, because nothing built on this has needed them yet: documents,
-    stickers, locations, contact cards and channels.
+    Not supported: <code>template</code> (there is no 24-hour window here to need one),
+    <code>interactive</code>, and <code>contacts</code> messages.
   </p>
 </section>
 
@@ -186,86 +206,103 @@
     left paired for a week would flood its bot with stale conversation the moment a URL
     appeared. Sending works throughout.
   </p>
-  <p>
-    Each request carries <em>one</em> of these arrays. Handle the ones you care about and
-    ignore the rest.
+
+  <h3>An incoming message</h3>
+  <p>Meta's envelope, nesting and field names, unchanged:</p>
+  <pre><code>{
+  "object": "whatsapp_business_account",
+  "entry": [ {
+    "id": "&lt;BUSINESS_ACCOUNT_ID&gt;",
+    "changes": [ {
+      "field": "messages",
+      "value": {
+        "messaging_product": "whatsapp",
+        "metadata": {
+          "display_phone_number": "40723418290",
+          "phone_number_id": "&lt;PHONE_NUMBER_ID&gt;"
+        },
+        "contacts": [ { "profile": { "name": "Bogdan" }, "wa_id": "40750271099" } ],
+        "messages": [ {
+          "from": "40750271099",
+          "id": "3EB0…",
+          "timestamp": "1754300000",
+          "type": "text",
+          "text": { "body": "Hello" }
+        } ]
+      }
+    } ]
+  } ]
+}</code></pre>
+  <p class="muted">
+    <code>timestamp</code> is a string of seconds, as Meta sends it.
   </p>
 
-  <h3>messages</h3>
-  <pre><code>{
-  "messages": [ {
-    "id": "3EB0…",
-    "from_me": false,
-    "type": "text",
-    "chat_id": "120363012345678901@g.us",   // or "40750271099@s.whatsapp.net"
-    "chat_name": "Team lunch",
-    "from": "40750271099",                   // bare digits
-    "from_name": "Bogdan",
-    "timestamp": 1754300000,
-    "text": { "body": "Hello" }
-  } ]
-}</code></pre>
+  <h3>From a group</h3>
+  <p>
+    Identical, with a <code>group_id</code> on the message and the participant's number in
+    <code>from</code> — exactly how Meta represents a group message:
+  </p>
+  <pre><code>"messages": [ {
+  "from": "40750271099",              // who sent it
+  "group_id": "120363012345678901@g.us",
+  "id": "3EB0…", "timestamp": "1754300000",
+  "type": "text", "text": { "body": "Hello everyone" }
+} ]</code></pre>
 
-  <p>The payload carries one body field, matching <code>type</code>:</p>
+  <h3>Message types</h3>
   <table>
-    <thead><tr><th>type</th><th>field</th></tr></thead>
+    <thead><tr><th>type</th><th>payload</th></tr></thead>
     <tbody>
       <tr><td><code>text</code></td><td><code>text.body</code></td></tr>
-      <tr><td><code>image</code></td><td><code>image.link</code>, <code>image.preview</code>, <code>image.caption</code></td></tr>
-      <tr><td><code>gif</code></td><td><code>gif.preview</code>, <code>gif.caption</code></td></tr>
-      <tr><td><code>voice</code></td><td><code>voice.link</code></td></tr>
-      <tr><td><code>audio</code></td><td><code>audio.link</code></td></tr>
-      <tr><td><code>link_preview</code></td><td><code>link_preview.title</code>, <code>.description</code>, <code>.preview</code></td></tr>
+      <tr><td><code>image</code></td><td><code>image.link</code>, <code>.caption</code>, <code>.mime_type</code></td></tr>
+      <tr><td><code>video</code></td><td><code>video.link</code>, <code>.caption</code> — GIFs arrive as video, as they do on WhatsApp</td></tr>
+      <tr><td><code>audio</code></td><td><code>audio.link</code>, <code>.voice</code> (true for a voice note)</td></tr>
     </tbody>
   </table>
-
   <div class="note">
-    <strong>Media links are public and temporary.</strong> WhatsApp media arrives
-    encrypted; the gateway downloads it, decrypts it and re-hosts it at an unguessable
-    URL so your code — or a third party you hand the URL to, like an image or
-    transcription model — can fetch it with a plain GET and no credentials. Links expire
-    (48 hours by default), so fetch what you need when the event arrives.
+    <strong>Media links are public and temporary.</strong> Meta gives you a media id to
+    exchange for a URL; this gateway has already downloaded and decrypted the file and
+    gives you <code>link</code> directly — a plain GET, no credentials, so you can hand it
+    to an image or transcription model as-is. Links expire (48 hours by default), so fetch
+    what you need when the event arrives.
   </div>
 
-  <h3>groups</h3>
-  <p>Sent when a group is joined, renamed, or its membership changes.</p>
-  <pre><code>{ "groups": [ { "id": "…@g.us", "name": "Team lunch",
-               "participants": [ { "id": "40750271099", "name": "Bogdan" } ] } ] }</code></pre>
+  <h3>Group membership</h3>
+  <p>On Meta's <code>group_participants_update</code> field:</p>
+  <pre><code>{ "field": "group_participants_update",
+  "value": { …, "groups": [ {
+    "group_id": "120363012345678901@g.us",
+    "subject": "Team lunch",
+    "participants": [ { "wa_id": "40750271099", "name": "Bogdan" } ]
+  } ] } }</code></pre>
 
-  <h3>contacts</h3>
-  <pre><code>{ "contacts": [ { "id": "40750271099", "name": "Bogdan" } ] }</code></pre>
+  <h3>Contacts</h3>
+  <pre><code>{ "field": "contacts",
+  "value": { …, "contacts": [ { "profile": { "name": "Bogdan" }, "wa_id": "40750271099" } ] } }</code></pre>
+  <p class="muted">Only sent when a name actually changes, not on every WhatsApp re-announcement.</p>
 
-  <h3 id="poll-updates">messages_updates</h3>
-  <p>Running tallies for a poll you sent. Votes are end-to-end encrypted; the gateway decrypts and aggregates them.</p>
-  <pre><code>{
-  "messages_updates": [ {
-    "after_update": {
-      "id": "3EB0…",                  // the poll message id
-      "type": "poll",
-      "chat_id": "…@g.us",
-      "poll": {
-        "name": "Lunch?",
-        "total": 3,
-        "results": [
-          { "name": "Pizza",   "count": 2, "voters": ["40750271099", "40711111111"] },
-          { "name": "Sushi",   "count": 1, "voters": ["40722222222"] },
-          { "name": "Neither", "count": 0, "voters": [] }
-        ]
-      }
-    }
-  } ]
-}</code></pre>
+  <h3>Poll results</h3>
+  <p>
+    Meta has no poll type, so this one is ours — but it is shaped like everything else and
+    carried on its own field, so an existing switch ignores it safely.
+  </p>
+  <pre><code>{ "field": "message_polls",
+  "value": { …, "polls": [ {
+    "id": "3EB0…", "group_id": "120363012345678901@g.us",
+    "name": "Lunch?", "total": 3,
+    "results": [ { "name": "Pizza", "count": 2, "voters": ["40750271099","40711111111"] } ]
+  } ] } }</code></pre>
 
   <div class="note">
     <strong>Delivery is ordered and at-least-once.</strong> Events for a number are
     delivered one at a time, in order — a slow endpoint delays that number's queue rather
-    than getting events out of sequence. Non-2xx or a timeout is retried a few times, so
-    <strong>your handler must be idempotent</strong>: dedupe on the message <code>id</code>.
+    than reordering it. Non-2xx or a timeout is retried, so <strong>your handler must be
+    idempotent</strong>: dedupe on the message <code>id</code>.
   </div>
   <p class="muted">
-    Not forwarded at all: your own outgoing messages, status/broadcast updates, message
-    history on reconnect, and types with no body the API models — stickers, documents,
-    locations, contact cards and non-GIF video.
+    Not forwarded: your own outgoing messages, status/broadcast updates, history on
+    reconnect, and types with no payload here — stickers, documents, locations and
+    contact cards inbound.
   </p>
 </section>
 
@@ -312,6 +349,82 @@
   </p>
 </section>
 
+
+<!-- ------------------------------------------------------------------ -->
+<section id="differences">
+  <h2>Differences from Meta</h2>
+  <p>
+    The shapes above are Meta's. The behaviour behind them is not identical, and every
+    difference below is this gateway being <em>less</em> restricted — because it is a
+    linked device on a real WhatsApp account rather than a Business Platform tenant.
+  </p>
+
+  <table>
+    <thead><tr><th></th><th>WhatsApp Cloud API</th><th>wa-gateway</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Opening a conversation</td>
+        <td>Approved template required outside the 24-hour service window</td>
+        <td>No window and no templates — send text whenever</td>
+      </tr>
+      <tr>
+        <td>Which groups</td>
+        <td>Only ones created through the Groups API, with the business as admin</td>
+        <td>Any group the linked number is in</td>
+      </tr>
+      <tr>
+        <td>Group ids</td>
+        <td>Opaque tokens minted by the Groups API (<code>Y2FwaV9ncm91cDo…</code>)</td>
+        <td>WhatsApp's own group ids (<code>1203…@g.us</code>)</td>
+      </tr>
+      <tr>
+        <td>Group creation, invite links, join approval</td>
+        <td>Dedicated endpoints</td>
+        <td>Not supported — create and join on the phone</td>
+      </tr>
+      <tr>
+        <td>Media</td>
+        <td>A media id you exchange for a URL</td>
+        <td>A public, temporary <code>link</code>, already decrypted</td>
+      </tr>
+      <tr>
+        <td>Onboarding</td>
+        <td>Business verification, an app, a WABA</td>
+        <td>Scan a QR</td>
+      </tr>
+      <tr>
+        <td>Cost</td>
+        <td>Per conversation</td>
+        <td>Your electricity bill</td>
+      </tr>
+      <tr>
+        <td>Delivery/read receipts outbound</td>
+        <td><code>statuses[]</code> webhooks</td>
+        <td>Not emitted</td>
+      </tr>
+      <tr>
+        <td><code>interactive</code>, <code>template</code>, <code>contacts</code> messages</td>
+        <td>Supported</td>
+        <td>Rejected with a <code>(#100)</code> error naming the type</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="muted">
+    And the obvious one: this drives WhatsApp through an unofficial client, so it has no
+    SLA and no support contract. Meta's platform is the right choice for anything where
+    those matter.
+  </p>
+
+  <h3>Still speaking the older format?</h3>
+  <p>
+    The previous whapi-shaped surface has not gone anywhere —
+    <code>POST /messages/text</code> and the rest still work, alongside the Cloud
+    endpoint. A number's <em>webhook</em> can only be one shape at a time, so that is a
+    per-number setting in the console: <strong>WhatsApp Cloud API</strong> (the default)
+    or <strong>whapi</strong>.
+  </p>
+</section>
 
 <footer>
   <a href="/">Home</a> · <a href="/console.html">Console</a> ·

@@ -85,7 +85,7 @@ label { display: flex; flex-direction: column; gap: .3rem; }
 label > span { font-weight: 600; font-size: .875rem; }
 label small { color: var(--muted); font-size: .8rem; line-height: 1.45; }
 
-input {
+input, select {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -95,7 +95,7 @@ input {
   width: 100%;
   min-width: 0;
 }
-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
 
 button {
   font: inherit;

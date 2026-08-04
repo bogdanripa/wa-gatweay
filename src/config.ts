@@ -50,6 +50,10 @@ export interface SessionConfig {
     pairPhone?: string;
     /** Outbound cap per minute. Absent means no cap at all. */
     sendRatePerMinute?: number;
+    /** Meta-style stable numeric id for this number. */
+    phoneNumberId: string;
+    /** Webhook dialect: Meta Cloud API envelope, or the older whapi shape. */
+    webhookFormat: "cloud" | "whapi";
 }
 
 /**

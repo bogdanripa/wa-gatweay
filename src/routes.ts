@@ -8,6 +8,12 @@ import type { Session } from "./session.js";
 import type { SessionManager } from "./sessions.js";
 import type { MediaStore } from "./media.js";
 import { NotFoundError, ValidationError, normaliseId } from "./sessionStore.js";
+import {
+    CloudRequestError,
+    buildCloudError,
+    buildCloudSendResponse,
+    parseCloudSendRequest,
+} from "./cloud.js";
 import { toWaJid, toWhapiUserId } from "./jid.js";
 
 /**
@@ -68,16 +74,22 @@ export function makeApiRouter(manager: SessionManager): Router {
     // Scoped to the real API prefixes rather than mounted at the root: a typo'd
     // path should 404, not 401. A 401 on an unknown route sends you hunting for a
     // credentials problem that isn't there.
-    router.use(["/groups", "/messages", "/presences"], (req: ApiRequest, res: Response, next) => {
-        const token = bearerOf(req);
-        const session = token ? manager.byTokenOrNull(token) : null;
-        if (!session) {
-            res.status(401).json({ error: { message: "unauthorized" } });
-            return;
+    // `/:phoneNumberId/messages` can't be prefix-scoped like the others, so the
+    // Cloud route authenticates through the same middleware by matching any
+    // first segment followed by /messages.
+    router.use(
+        ["/groups", "/messages", "/presences", "/:phoneNumberId/messages"],
+        (req: ApiRequest, res: Response, next) => {
+            const token = bearerOf(req);
+            const session = token ? manager.byTokenOrNull(token) : null;
+            if (!session) {
+                res.status(401).json({ error: { message: "unauthorized" } });
+                return;
+            }
+            req.session = session;
+            next();
         }
-        req.session = session;
-        next();
-    });
+    );
 
     // Every handler below runs after the middleware, so the session is present.
     const sessionOf = (req: ApiRequest): Session => req.session!;
@@ -189,6 +201,44 @@ export function makeApiRouter(manager: SessionManager): Router {
             res.json({ sent: true });
         } catch (e) {
             fail(res, e, 502);
+        }
+    });
+
+    // --- WhatsApp Cloud API compatible ---------------------------------------
+    //
+    // `POST /<PHONE_NUMBER_ID>/messages`, Meta's shape. The path segment is
+    // accepted but not used for routing: the bearer token already identifies
+    // exactly one number, which is what makes migrating a base-URL change and
+    // nothing else — an existing client's URL keeps working verbatim.
+    //
+    // It is still *validated*, because a segment naming a DIFFERENT configured
+    // number is a real misconfiguration worth catching rather than silently
+    // sending from the wrong account.
+    router.post("/:phoneNumberId/messages", async (req: ApiRequest, res) => {
+        const session = sessionOf(req);
+        try {
+            const addressed = String(req.params.phoneNumberId || "");
+            const other = manager.all().find(
+                (s) => s.id !== session.id && s.matchesAddress(addressed)
+            );
+            if (other) {
+                throw new CloudRequestError(
+                    "(#100) Parameter phone_number_id does not match the access token",
+                    100,
+                    `The token authenticates "${session.id}", but the path addresses "${other.id}".`
+                );
+            }
+
+            const request = parseCloudSendRequest(req.body);
+            const { messageId, waId } = await session.sendCloud(request);
+            res.json(buildCloudSendResponse(request.to || waId, waId, messageId));
+        } catch (e) {
+            if (e instanceof CloudRequestError) {
+                res.status(400).json(buildCloudError(e));
+                return;
+            }
+            logger.error({ e }, "cloud send failed");
+            res.status(502).json(buildCloudError(e instanceof Error ? e : new Error(String(e))));
         }
     });
 

@@ -104,6 +104,29 @@ export function generateToken(): string {
     return randomBytes(24).toString("base64url");
 }
 
+/**
+ * The analogue of Meta's `phone_number_id`: 15 numeric digits, minted at
+ * creation and never derived from the linked phone number.
+ *
+ * Meta's is likewise unrelated to the display number, and clients need
+ * *something* to put in the request path before a number has been paired at
+ * all — so it cannot come from the WhatsApp account.
+ */
+export function generatePhoneNumberId(): string {
+    let digits = "";
+    for (const byte of randomBytes(16)) digits += (byte % 10).toString();
+    // Leading zero would look wrong beside Meta's, and reads as a typo.
+    return (digits[0] === "0" ? "1" : digits[0]) + digits.slice(1, 15);
+}
+
+function validateWebhookFormat(raw: unknown): "cloud" | "whapi" {
+    if (raw === undefined || raw === null || raw === "") return "cloud";
+    if (raw !== "cloud" && raw !== "whapi") {
+        throw new ValidationError('webhookFormat must be "cloud" or "whapi"');
+    }
+    return raw;
+}
+
 export function toSessionConfig(doc: SessionDoc): SessionConfig {
     return {
         id: doc._id,
@@ -111,6 +134,8 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         webhookUrl: doc.webhookUrl,
         pairPhone: doc.pairPhone,
         sendRatePerMinute: doc.sendRatePerMinute,
+        phoneNumberId: doc.phoneNumberId,
+        webhookFormat: doc.webhookFormat ?? "cloud",
     };
 }
 
@@ -119,19 +144,39 @@ export interface CreateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
+    webhookFormat?: unknown;
 }
 
 export interface UpdateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
+    webhookFormat?: unknown;
 }
 
 export class SessionStore {
     constructor(private stores: Stores) {}
 
     async all(): Promise<SessionDoc[]> {
-        return this.stores.sessions.find().sort({ _id: 1 }).toArray();
+        const docs = await this.stores.sessions.find().sort({ _id: 1 }).toArray();
+
+        // Backfill numbers created before these fields existed. Done here rather
+        // than as a migration script because it has to happen exactly once per
+        // document and this is the only path that reads them — a number without
+        // a phone_number_id can't be addressed on the Cloud endpoint at all.
+        for (const doc of docs) {
+            const patch: Partial<SessionDoc> = {};
+            if (!doc.phoneNumberId) patch.phoneNumberId = generatePhoneNumberId();
+            // Existing numbers keep the older dialect: they were paired against a
+            // bot that speaks it, and silently reshaping their webhook payloads
+            // would break that bot on the next deploy.
+            if (!doc.webhookFormat) patch.webhookFormat = "whapi";
+            if (!Object.keys(patch).length) continue;
+
+            Object.assign(doc, patch);
+            await this.stores.sessions.updateOne({ _id: doc._id }, { $set: patch });
+        }
+        return docs;
     }
 
     async get(id: string): Promise<SessionDoc | null> {
@@ -146,6 +191,8 @@ export class SessionStore {
             webhookUrl: validateWebhookUrl(input.webhookUrl),
             pairPhone: validatePairPhone(input.pairPhone),
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
+            phoneNumberId: generatePhoneNumberId(),
+            webhookFormat: validateWebhookFormat(input.webhookFormat),
             createdAt: new Date(),
             updatedAt: new Date(),
         };
@@ -182,6 +229,9 @@ export class SessionStore {
             const phone = validatePairPhone(patch.pairPhone);
             if (phone) $set.pairPhone = phone;
             else $unset.pairPhone = "";
+        }
+        if (patch.webhookFormat !== undefined) {
+            $set.webhookFormat = validateWebhookFormat(patch.webhookFormat);
         }
         if (patch.sendRatePerMinute !== undefined) {
             const rate = validateRate(patch.sendRatePerMinute);
