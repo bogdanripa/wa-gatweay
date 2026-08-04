@@ -115,7 +115,17 @@ function mongoUrl(): string {
 
 export const config = {
     mongoUrl: mongoUrl(),
-    mongoDb: optional("WA_MONGO_DB", "wa_gateway"),
+
+    /**
+     * Database name, or empty to use whatever the connection string names.
+     *
+     * Empty is the right default. A managed database hands you a URL whose user
+     * is authorised for exactly one database — the one in the URL's path — so a
+     * hardcoded name here doesn't fail at connect time, which would at least be
+     * obvious. It connects fine and then throws `Unauthorized` on the first
+     * index build, which reads like a broken schema rather than a wrong name.
+     */
+    mongoDb: optional("WA_MONGO_DB", ""),
 
     /** This gateway's public HTTPS base URL — the app root, no trailing slash. */
     publicUrl,

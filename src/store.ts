@@ -76,7 +76,9 @@ export interface Stores {
 export async function connectStores(): Promise<Stores> {
     const client = new MongoClient(config.mongoUrl);
     await client.connect();
-    const db = client.db(config.mongoDb);
+    // No argument means "the database named in the connection string", which is
+    // the one a managed provider's credentials are actually scoped to.
+    const db = client.db(config.mongoDb || undefined);
 
     const sessions = db.collection<SessionDoc>("sessions");
     const authCreds = db.collection<{ _id: string; value: string }>("auth_creds");
@@ -90,8 +92,19 @@ export async function connectStores(): Promise<Stores> {
 
     // Not tolerant like the others: two sessions sharing a token makes routing
     // ambiguous, so one bot would silently drive the wrong WhatsApp number. The
-    // API checks for it too, but only the index makes it impossible.
-    await sessions.createIndex({ token: 1 }, { unique: true });
+    // API checks for it too, but only the index makes it impossible, so failing
+    // to build it is a refusal to start rather than a warning.
+    try {
+        await sessions.createIndex({ token: 1 }, { unique: true });
+    } catch (e) {
+        throw new Error(
+            `could not create the unique index on sessions.token in database "${db.databaseName}" — ` +
+                `the gateway will not run without it. A managed database's user is usually authorised ` +
+                `for only the database named in its connection string, so check WA_MONGO_DB. Cause: ${
+                    e instanceof Error ? e.message : String(e)
+                }`
+        );
+    }
 
     // Message keys only need to outlive the window in which a bot might react to
     // or mark-as-read a message. A week is generous.
@@ -109,7 +122,7 @@ export async function connectStores(): Promise<Stores> {
     );
     await index(media.createIndex({ sessionId: 1 }), "media sessionId");
 
-    logger.info({ db: config.mongoDb }, "mongo connected");
+    logger.info({ db: db.databaseName }, "mongo connected");
 
     return {
         db,
