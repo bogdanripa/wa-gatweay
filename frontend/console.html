@@ -52,7 +52,7 @@
     <h2>Bot configuration</h2>
     <p class="muted">Every bot points at this base URL and sends its own number's token.</p>
     <div class="kv">
-      <span class="k">WHAPI_BASE_URL</span>
+      <span class="k">Base URL</span>
       <code id="api-base" class="v"></code>
       <button class="ghost copy" data-copy="#api-base">Copy</button>
     </div>
@@ -70,8 +70,8 @@
       </label>
       <label>
         <span>Webhook URL</span>
-        <input name="webhookUrl" type="url" placeholder="https://…/whapi" required>
-        <small>The bot's own <code>/whapi</code> endpoint. Inbound messages are POSTed here.</small>
+        <input name="webhookUrl" type="url" placeholder="https://…/webhook" required>
+        <small>The bot's own inbound endpoint. Messages for this number are POSTed here.</small>
       </label>
       <label>
         <span>Pairing phone <span class="muted">(optional)</span></span>
@@ -94,8 +94,8 @@
 <dialog id="token-dialog">
   <h2>Token for <span id="token-for"></span></h2>
   <p class="muted">
-    Set this as that bot's <code>WHAPI_TOKEN</code>. It selects which WhatsApp
-    number the bot reaches.
+    Give this to that bot as its bearer token. It selects which WhatsApp number
+    the bot reaches.
   </p>
   <code id="token-value" class="token"></code>
   <div class="row">

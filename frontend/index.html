@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>wa-gateway — a self-hosted WhatsApp API for your bots</title>
-<meta name="description" content="A whapi.cloud-compatible WhatsApp gateway you run yourself. Host several numbers, keep your bot's code unchanged, and stop paying per channel.">
+<meta name="description" content="A WhatsApp gateway you run yourself. Host several numbers behind one HTTP API, each with its own token, webhook and credentials.">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body class="marketing">
@@ -21,8 +21,8 @@
   <h2>A WhatsApp API you own.</h2>
   <p class="lede">
     wa-gateway holds the WhatsApp sessions for your bots and exposes them as a plain
-    HTTP API — the same endpoints, request bodies and webhook payloads whapi.cloud
-    speaks. Point an existing bot at it by changing one environment variable.
+    HTTP API. Send a message with a POST; receive one as a webhook. Run it on your own
+    hardware, host as many numbers as you like, and answer to nobody's rate card.
   </p>
   <div class="row">
     <a class="btn primary" href="/console.html">Add a number</a>
@@ -49,10 +49,11 @@
   <h2>What it does</h2>
   <div class="grid">
     <div>
-      <h3>Drop-in for whapi.cloud</h3>
+      <h3>Plain HTTP, no SDK</h3>
       <p class="muted">
-        Same paths, same bodies, same response shapes, same webhook events. Migrating an
-        existing bot is a base-URL change and a token swap — not a rewrite.
+        Predictable JSON endpoints and bearer tokens. Anything that can make an HTTP
+        request can drive it — no client library to install, nothing to keep in step
+        with a vendor's releases.
       </p>
     </div>
     <div>

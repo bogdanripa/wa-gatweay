@@ -238,7 +238,7 @@ function actions(n) {
                 });
                 showToken(n.id, fresh);
             },
-            `Rotate ${n.id}'s token?\n\nThe old token stops working immediately — that bot goes silent until its WHAPI_TOKEN is updated.`
+            `Rotate ${n.id}'s token?\n\nThe old token stops working immediately — that bot goes silent until its token is updated.`
         ),
     });
 

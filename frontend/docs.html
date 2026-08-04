@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>API docs — wa-gateway</title>
-<meta name="description" content="How to send WhatsApp messages and receive events through wa-gateway's whapi.cloud-compatible HTTP API.">
+<meta name="description" content="How to send WhatsApp messages and receive events through wa-gateway's HTTP API.">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body class="docs">
@@ -24,7 +24,6 @@
   <a href="#webhook">Receiving</a>
   <a href="#status">Status</a>
   <a href="#manage">Managing numbers</a>
-  <a href="#migrate">Migrating from whapi.cloud</a>
 </nav>
 
 <!-- ------------------------------------------------------------------ -->
@@ -134,6 +133,11 @@
     <code>502</code> with a message saying so, rather than queueing — it's a backstop
     against a loop in your bot, not a traffic shaper.
   </div>
+
+  <p class="muted">
+    Not supported, because nothing built on this has needed them yet: documents,
+    stickers, locations, contact cards and channels.
+  </p>
 </section>
 
 <!-- ------------------------------------------------------------------ -->
@@ -294,25 +298,6 @@
   </p>
 </section>
 
-<!-- ------------------------------------------------------------------ -->
-<section id="migrate">
-  <h2>Migrating from whapi.cloud</h2>
-  <p>
-    The endpoints, request bodies, response shapes and webhook payloads above are
-    whapi's. For an existing bot, the migration is two configuration values:
-  </p>
-  <pre><code>WHAPI_BASE_URL = https://wa-gateway-coolify.bogdanripa.com/api
-WHAPI_TOKEN    = &lt;the token the console showed for your number&gt;</code></pre>
-  <p>
-    If your bot hardcodes <code>https://gate.whapi.cloud</code>, lift that into a variable
-    first — that's the only code change. Rolling back is pointing the variable at whapi
-    again, so keep the old channel alive for a week and the migration stays reversible.
-  </p>
-  <p class="muted">
-    Not implemented, because nothing here needed them: documents, stickers, locations,
-    contact cards, channels/newsletters, and whapi's account-management endpoints.
-  </p>
-</section>
 
 <footer>
   <a href="/">Home</a> · <a href="/console.html">Console</a> ·
