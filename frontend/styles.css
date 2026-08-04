@@ -267,8 +267,6 @@ body.marketing, body.docs { max-width: 820px; }
 .steps { margin: 0 0 1rem; padding-left: 1.25rem; }
 .steps li { margin-bottom: .5rem; }
 
-.quiet { background: none; border-style: dashed; }
-
 footer {
   text-align: center;
   color: var(--muted);
