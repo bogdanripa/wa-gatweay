@@ -221,6 +221,18 @@ try {
         `status=${badRate.status}`
     );
 
+    // --- activity marker -----------------------------------------------------
+    //
+    // The console's "is this working?" line. Nothing has arrived on a freshly
+    // added number, so it must say so rather than inventing a timestamp.
+
+    const fresh = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "gepetel");
+    check(
+        "a new number reports no messages received yet",
+        fresh?.lastMessage === undefined && fresh?.messagesReceived === 0,
+        JSON.stringify({ lastMessage: fresh?.lastMessage, count: fresh?.messagesReceived })
+    );
+
     // --- pair first, configure the webhook later -----------------------------
     //
     // Pairing is the slow, physical step. Requiring a webhook URL up front would

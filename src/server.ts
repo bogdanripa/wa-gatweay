@@ -5,6 +5,7 @@ import { connectStores } from "./store.js";
 import { MediaStore } from "./media.js";
 import { SessionManager } from "./sessions.js";
 import { makeApiRouter, makeGatewayRouter, makeManagementRouter } from "./routes.js";
+import { ConnectionWatcher, TelegramNotifier } from "./alerts.js";
 
 async function main() {
     const stores = await connectStores();
@@ -56,9 +57,18 @@ async function main() {
 
     await manager.loadAll();
 
+    // Started after loadAll so it seeds from real state, and a restart doesn't
+    // announce every number as freshly recovered.
+    const watcher = new ConnectionWatcher(
+        manager,
+        new TelegramNotifier(config.telegramBotToken, config.telegramChatId)
+    );
+    watcher.start();
+
     const shutdown = async (signal: string) => {
         logger.info({ signal }, "shutting down");
         server.close();
+        watcher.stop();
         await manager.stopAll();
         await stores.close();
         process.exit(0);

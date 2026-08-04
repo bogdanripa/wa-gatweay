@@ -90,6 +90,12 @@ If scanning a screen is awkward, set that number's **pairing phone** (digits, wi
 
 The console is also where you recover a number: **Restart** bounces a stuck socket, **Unlink & re-pair** wipes its credentials and shows a fresh QR, **Rotate token** issues a new bot credential, and **Delete** removes the number and purges everything stored for it.
 
+### Alerts
+
+A number that quietly loses its connection is the failure that actually costs you: the bot goes silent, nobody notices for a day, and the first sign is someone asking why they were ignored. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (shared platform-wide on Pironman, so every app uses the same bot) and the gateway tells you.
+
+The whole design problem is noise. WhatsApp drops sockets constantly and Baileys reconnects in seconds — alerting on every `connection: close` would train you to ignore alerts within an hour, which is worse than having none. So a routine drop gets a three-minute grace period and never alerts if it recovers; `logged-out` and `conflict` alert immediately because they never self-heal; a number that has never connected is treated as unpaired rather than broken; and recovery is announced so a resolved alert doesn't leave you guessing.
+
 ### Health
 
 - **`/api/health`** — liveness. 200 whenever the process is up, *including with zero numbers configured*, because Pironman gates deploys on it: a readiness check here would mean a fresh deployment could never go healthy long enough for anyone to add the first number. Counts only, no identifying detail — it is unauthenticated.

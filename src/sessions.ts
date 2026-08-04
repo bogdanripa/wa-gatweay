@@ -48,9 +48,16 @@ export class SessionManager {
      */
     async loadAll() {
         const docs = await this.store.all();
-        for (const doc of docs) this.track(new Session(toSessionConfig(doc), this.stores, this.media));
+        for (const doc of docs) this.build(doc);
         await Promise.all(this.all().map((s) => this.startIsolated(s)));
         logger.info({ sessions: this.all().map((s) => s.id) }, "sessions loaded");
+    }
+
+    /** Rebuild a Session and restore the activity it had before a restart. */
+    private build(doc: SessionDoc): Session {
+        const session = new Session(toSessionConfig(doc), this.stores, this.media);
+        session.lastMessage = doc.lastMessage;
+        return this.track(session);
     }
 
     private track(session: Session): Session {
@@ -72,7 +79,7 @@ export class SessionManager {
     /** Add a number and bring it straight up, so a QR is waiting by the time the console refreshes. */
     async create(input: CreateSessionInput): Promise<SessionDoc> {
         const doc = await this.store.create(input);
-        const session = this.track(new Session(toSessionConfig(doc), this.stores, this.media));
+        const session = this.build(doc);
         await this.startIsolated(session);
         logger.info({ session: doc._id }, "number added");
         return doc;

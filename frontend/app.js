@@ -20,6 +20,34 @@ let editingId = null;
 
 const $ = (sel) => document.querySelector(sel);
 
+/** "3 minutes ago", "2 days ago". Returns null for a missing timestamp. */
+function timeAgo(iso) {
+    if (!iso) return null;
+    const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+    if (seconds < 45) return "just now";
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    const units = [
+        ["year", 31536000],
+        ["month", 2592000],
+        ["week", 604800],
+        ["day", 86400],
+        ["hour", 3600],
+        ["minute", 60],
+    ];
+    for (const [unit, size] of units) {
+        if (seconds >= size) return rtf.format(-Math.round(seconds / size), unit);
+    }
+    return "just now";
+}
+
+/** "from Bogdan in Team lunch" — whatever of that we actually know. */
+function describeSender(m) {
+    const who = m.fromName || m.from || "someone";
+    if (m.isGroup && m.chatName) return `from ${who} in ${m.chatName}`;
+    if (m.isGroup) return `from ${who} in a group`;
+    return `from ${who}`;
+}
+
 /**
  * Build an element. Everything user-supplied goes in as `text`, never as HTML —
  * ids and webhook URLs are operator input, and this page shows bot tokens.
@@ -161,14 +189,18 @@ function editForm(n) {
         onsubmit: async (e) => {
             e.preventDefault();
             const data = new FormData(form);
+            const patch = {
+                webhookUrl: data.get("webhookUrl"),
+                sendRatePerMinute: data.get("sendRatePerMinute"),
+            };
+            // Only sent when the field was actually rendered. It is hidden for a
+            // linked number, and an absent field reads as an empty string —
+            // which the API would faithfully store as "cleared".
+            if (data.has("pairPhone")) patch.pairPhone = data.get("pairPhone");
             try {
                 await api(`/numbers/${encodeURIComponent(n.id)}`, {
                     method: "PATCH",
-                    body: JSON.stringify({
-                        webhookUrl: data.get("webhookUrl"),
-                        pairPhone: data.get("pairPhone"),
-                        sendRatePerMinute: data.get("sendRatePerMinute"),
-                    }),
+                    body: JSON.stringify(patch),
                 });
                 editingId = null;
                 await refresh();
@@ -187,10 +219,27 @@ function editForm(n) {
                 placeholder: "none — messages are discarded",
             })
         ),
-        el("label", {},
-            el("span", { text: "Pairing phone" }),
-            el("input", { name: "pairPhone", value: n.pairPhone || "", placeholder: "optional" })
-        ),
+        // Hidden once the number is linked, because it does nothing then: it is
+        // only read while requesting a pairing code, and showing an editable
+        // "phone" on a live session implies you could move it to another
+        // account. You can't — the account is whichever phone scanned the code.
+        n.status === "connected"
+            ? null
+            : el("label", {},
+                el("span", { text: "Pair with a code instead of a QR" }),
+                el("input", {
+                    name: "pairPhone",
+                    inputmode: "numeric",
+                    value: n.pairPhone || "",
+                    placeholder: "40750271099",
+                }),
+                el("small", {
+                    text:
+                        "The number you are linking, digits with country code. Used only to " +
+                        "request an 8-character pairing code — it cannot change which WhatsApp " +
+                        "account this session controls. Leave empty to scan a QR instead.",
+                })
+              ),
         el("label", {},
             el("span", { text: "Send rate / minute" }),
             el("input", {
@@ -303,6 +352,17 @@ function card(n) {
         statusNote(n),
         pairingBlock(n),
         kv("Account", n.me?.id ? `${n.me.id}${n.me.name ? ` (${n.me.name})` : ""}` : "—"),
+        // The line that answers "is this actually working?". A connected badge
+        // only means a socket is open; this means messages are arriving.
+        kv(
+            "Last message",
+            n.lastMessage
+                ? el("span", { class: "v" },
+                    el("strong", { text: timeAgo(n.lastMessage.at) }),
+                    ` ${describeSender(n.lastMessage)}`
+                  )
+                : "none yet"
+        ),
         kv("Webhook", n.webhookUrl || "not set"),
         kv("Connected since", n.connectedAt ? new Date(n.connectedAt).toLocaleString() : "—"),
         kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
@@ -351,7 +411,14 @@ function render(payload) {
     }
 
     const nodes = numbers.map((n) => {
-        const sig = JSON.stringify(n) + (editingId === n.id ? "|editing" : "");
+        // The rendered "3 minutes ago" is part of the signature, not just the
+        // timestamp behind it: the data doesn't change between messages, so a
+        // signature over data alone would freeze the text at whatever it said
+        // when the message landed.
+        const sig =
+            JSON.stringify(n) +
+            "|" + timeAgo(n.lastMessage?.at) +
+            (editingId === n.id ? "|editing" : "");
         const cached = cardCache.get(n.id);
         if (cached?.sig === sig) return cached.node;
         const node = card(n);

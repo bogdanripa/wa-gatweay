@@ -53,6 +53,8 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 
 **`WA_MONGO_DB` empty means "whatever the connection string names."** A managed database's user is authorised for exactly the database in its URL path. A hardcoded name doesn't fail at connect — it connects, then throws `Unauthorized` on the first `createIndex`, which reads like a broken schema. That cost a deploy; the error is now wrapped to say so.
 
+**Connection alerts must stay quiet to stay useful.** `alerts.ts` deliberately does *not* fire on every disconnect: WhatsApp drops sockets constantly and Baileys reconnects within seconds, so a naive alert-on-close trains the operator to ignore it within an hour. The grace period, the immediate path for `logged-out`/`conflict`, and the "never connected is not an incident" rule are the whole point — don't simplify them away. A failed alert must never take down the thing it is watching, which is why every send is caught.
+
 **The management key is the keys to every number.** It creates sessions, reads every bot's token, and can unlink an account — from the public internet. Compare it in constant time, keep the failed-attempt throttle, and don't let a session token reach `/api/mgmt/*` (a compromised bot must not be able to enumerate the others). `trust proxy` is set for the throttle's benefit: without it every request looks like it came from Pironman's proxy and one attacker locks out the operator.
 
 **`messages.upsert` type.** Only `"notify"` is a live message. `"append"` is history backfill — forwarding it makes bots reply to week-old messages.
@@ -76,6 +78,7 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 | `media.ts` | download, decrypt, serve, sweep |
 | `webhook.ts` | serialised at-least-once delivery, one queue per session |
 | `routes.ts` | whapi-compatible REST + health/media + management API |
+| `alerts.ts` | Telegram connection alerts, deliberately debounced |
 | `frontend/` | the console — plain HTML/CSS/JS, no build step |
 | `dev/serve.mjs` | local stand-in for Pironman's static + `/api` proxy split |
 

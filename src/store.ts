@@ -25,6 +25,18 @@ export interface SessionDoc {
     webhookUrl?: string;
     pairPhone?: string;
     sendRatePerMinute?: number;
+    /**
+     * Last inbound message seen, persisted so a redeploy doesn't reset the
+     * console's "is this working?" line to "never". Written at most once a
+     * minute — it is a display marker, not an audit log.
+     */
+    lastMessage?: {
+        at: Date;
+        from: string;
+        fromName?: string;
+        chatName?: string;
+        isGroup: boolean;
+    };
     createdAt: Date;
     updatedAt: Date;
 }

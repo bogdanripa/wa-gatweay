@@ -21,7 +21,7 @@ import {
     classify,
     unwrap,
 } from "./map.js";
-import { digitsOf, isGroupJid, isLidJid, toWaJid } from "./jid.js";
+import { digitsOf, isGroupJid, isLidJid, toWaJid, toWhapiUserId } from "./jid.js";
 
 export type SessionStatus =
     | "starting"
@@ -91,6 +91,30 @@ export class Session {
     me?: { id: string; name?: string };
     lastError?: string;
     connectedAt?: Date;
+
+    /**
+     * Last live inbound message from WhatsApp, and last outbound send.
+     *
+     * These exist to answer "is this actually working?" — a connected badge only
+     * proves a socket is open, which is also true of a session that has silently
+     * stopped receiving. Seeded from Mongo on start so a redeploy doesn't reset
+     * the answer to "never".
+     */
+    lastMessage?: {
+        at: Date;
+        /** Sender, as bare digits. */
+        from: string;
+        /** WhatsApp push name, when the sender publishes one. */
+        fromName?: string;
+        /** Group subject, for group messages. */
+        chatName?: string;
+        isGroup: boolean;
+    };
+    lastSentAt?: Date;
+    /** Inbound messages seen since this process started. */
+    messagesReceived = 0;
+    /** Throttles the Mongo write behind lastMessageAt. */
+    private lastActivityPersistedAt = 0;
 
     constructor(
         private cfg: SessionConfig,
@@ -403,6 +427,15 @@ export class Session {
 
         const cls = classify(msg.message);
         if (cls.kind === "skip") {
+            // Still counts as proof the socket is delivering, so record it — but
+            // from the raw key only. Resolving a group's subject for a sticker
+            // would mean a metadata fetch WhatsApp rate-limits, for a message
+            // nobody downstream will ever see.
+            this.noteInbound({
+                from: digitsOf(msg.key.participant || msg.participant || msg.key.remoteJid),
+                fromName: msg.pushName || undefined,
+                isGroup: isGroupJid(msg.key.remoteJid),
+            });
             this.log.debug(
                 { id: msg.key.id, keys: Object.keys(unwrap(msg.message) || {}) },
                 "unsupported message type, skipped"
@@ -430,6 +463,13 @@ export class Session {
             ? await this.media.save(msg, cls.mediaKind, this.sock!, this.id)
             : undefined;
 
+        this.noteInbound({
+            from: toWhapiUserId(senderJid),
+            fromName: msg.pushName || undefined,
+            chatName,
+            isGroup,
+        });
+
         const payload = buildWhapiMessage(
             msg,
             cls,
@@ -439,6 +479,30 @@ export class Session {
         if (!payload) return;
 
         await this.webhook.send({ messages: [payload] });
+    }
+
+    /**
+     * Record that a message arrived, for the console's "is this actually
+     * working?" line.
+     *
+     * A `connected` badge only proves a socket is open — which is equally true
+     * of a session that has quietly stopped receiving. The timestamp is the
+     * useful signal; the sender and chat make it recognisable, so you can match
+     * it against a message you just sent yourself.
+     */
+    private noteInbound(m: { from: string; fromName?: string; chatName?: string; isGroup: boolean }) {
+        this.lastMessage = { at: new Date(), ...m };
+        this.messagesReceived++;
+
+        // Persisted so a redeploy doesn't reset the answer to "never", but at
+        // most once a minute: on a busy number this would otherwise be a Mongo
+        // write per message, on a Pi, purely to render one line.
+        const now = Date.now();
+        if (now - this.lastActivityPersistedAt < 60_000) return;
+        this.lastActivityPersistedAt = now;
+        void this.stores.sessions
+            .updateOne({ _id: this.id }, { $set: { lastMessage: this.lastMessage } })
+            .catch((e) => this.log.debug({ e }, "could not persist last-message marker"));
     }
 
     private async onMessageUpdates(
@@ -545,6 +609,7 @@ export class Session {
         const jid = toWaJid(to);
         if (!jid) throw new Error(`unroutable recipient: ${to}`);
         const sent = await sock.sendMessage(jid, { text: body });
+        this.lastSentAt = new Date();
         if (sent) await this.rememberKey(sent);
         return { id: sent?.key?.id || undefined };
     }
@@ -762,6 +827,9 @@ export class Session {
             lastError: this.lastError,
             pairingCode: this.pairingCode,
             qr: this.qr,
+            lastMessage: this.lastMessage,
+            lastSentAt: this.lastSentAt,
+            messagesReceived: this.messagesReceived,
             webhookBacklog: this.webhook.pending,
             reconnectAttempts: this.reconnectAttempts,
         };

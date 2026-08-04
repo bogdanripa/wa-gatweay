@@ -171,6 +171,23 @@ export const config = {
     mediaTtlHours: positiveInt("WA_MEDIA_TTL_HOURS", 48),
     mediaDir: optional("WA_MEDIA_DIR", "/tmp/wa-media"),
 
+    /**
+     * Telegram bot credentials for connection alerts.
+     *
+     * Reads the unprefixed names first, because these are shared platform-wide
+     * variables injected into every app on the box — one bot, every service.
+     * The `WA_`-prefixed names still win where they're set, so this gateway can
+     * be pointed at a different chat without disturbing anything else.
+     *
+     * Both halves must be present or alerting stays off. A token with nowhere to
+     * send isn't half-working, it's off, and treating it as configured would
+     * hide the fact that nobody is being told anything.
+     */
+    telegramBotToken:
+        optional("WA_TELEGRAM_BOT_TOKEN", "") || optional("TELEGRAM_BOT_TOKEN", "") || null,
+    telegramChatId:
+        optional("WA_TELEGRAM_CHAT_ID", "") || optional("TELEGRAM_CHAT_ID", "") || null,
+
     logLevel: optional("WA_LOG_LEVEL", "info"),
 };
 
