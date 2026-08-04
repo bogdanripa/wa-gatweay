@@ -27,6 +27,25 @@ async function main() {
     // address guessing keys. One hop: the proxy's own X-Forwarded-For entry.
     app.set("trust proxy", 1);
 
+    /**
+     * Nothing under /api is cacheable.
+     *
+     * The edge in front of this will otherwise cache a response and serve it
+     * back for later requests to the same path — including 404s, and including
+     * for POSTs. That was observed: a path that 404'd before a deploy kept
+     * returning the cached 404 afterwards, while the same path with a query
+     * string returned 200 from the live container. A bot would experience that
+     * as an endpoint that permanently stopped existing.
+     *
+     * Media sets its own cache-control afterwards and is exempt by being
+     * mounted later — it is immutable content behind an unguessable URL, and
+     * caching it is the point.
+     */
+    app.use(API_PREFIX, (_req, res, next) => {
+        res.setHeader("cache-control", "no-store");
+        next();
+    });
+
     // Everything hangs off /api because that is the only prefix Pironman routes
     // to the container; the management console is the static bundle answering
     // every other path. Health and media first — they must stay reachable when
