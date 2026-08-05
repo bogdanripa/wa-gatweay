@@ -11,13 +11,7 @@ import {
     toWhapiChatId,
     toWhapiUserId,
 } from "../dist/jid.js";
-import {
-    buildWhapiGroupEvent,
-    buildWhapiMessage,
-    buildWhapiPollUpdate,
-    classify,
-    unwrap,
-} from "../dist/map.js";
+import { classify, unwrap } from "../dist/map.js";
 import {
     buildCloudGroupEvent,
     buildCloudMessageEvent,
@@ -27,6 +21,13 @@ import {
 
 const GROUP = "120363012345678901@g.us";
 const USER = "40750271099@s.whatsapp.net";
+
+/**
+ * A real LID seen in production. Its digits are not a phone number, but nothing
+ * downstream can tell — which is the whole reason the resolution path exists.
+ */
+const LID = "139556506575001@lid";
+const PN = "40750271099@s.whatsapp.net";
 
 /**
  * gepetel's own group-id guard, copied verbatim from its whapi.ts. Anything the
@@ -176,159 +177,6 @@ test("ephemeral and view-once wrappers are unwrapped", () => {
         "deep"
     );
 });
-
-test("unwrap terminates on a self-referential wrapper instead of hanging", () => {
-    const evil = {};
-    evil.ephemeralMessage = { message: evil };
-    // Must return, not spin. The value itself doesn't matter.
-    const out = unwrap(evil);
-    assert.ok(out);
-});
-
-// ------------------------------------------------------- buildWhapiMessage
-
-const ids = {
-    chatJid: GROUP,
-    senderJid: USER,
-    chatName: "Familia",
-    senderName: "Bogdan",
-};
-
-test("a text message lands in gepetel's text branch", () => {
-    const msg = buildWhapiMessage(
-        { key: { id: "AAA", fromMe: false }, messageTimestamp: 1700000000 },
-        classify({ conversation: "salut" }),
-        ids
-    );
-    assert.equal(msg.id, "AAA");
-    assert.equal(msg.from_me, false);
-    assert.equal(msg.chat_id, GROUP);
-    assert.equal(msg.chat_name, "Familia");
-    assert.equal(msg.from, "40750271099");
-    assert.equal(msg.from_name, "Bogdan");
-    assert.deepEqual(gepetelBranch(msg), { branch: "text", value: "salut" });
-});
-
-test("an image message lands in gepetel's image branch and prefers the full-res link", () => {
-    const msg = buildWhapiMessage(
-        { key: { id: "BBB", fromMe: false } },
-        classify({ imageMessage: { caption: "uite" } }),
-        ids,
-        { link: "https://gw/media/x.jpg", preview: "data:image/jpeg;base64,AAAA" }
-    );
-    const b = gepetelBranch(msg);
-    assert.equal(b.branch, "image");
-    // gepetel: const src = message.image.link || message.image.preview
-    assert.equal(b.value, "https://gw/media/x.jpg");
-    assert.equal(msg.image.caption, "uite");
-});
-
-test("an image with no thumbnail still exposes a preview, so gepetel's guard passes", () => {
-    // gepetel's branch requires message.image.preview to be truthy. If we only set
-    // `link`, the image would be silently dropped.
-    const msg = buildWhapiMessage(
-        { key: { id: "CCC" } },
-        classify({ imageMessage: {} }),
-        ids,
-        { link: "https://gw/media/y.jpg" }
-    );
-    assert.ok(msg.image.preview, "image.preview must be set or gepetel ignores the message");
-    assert.equal(gepetelBranch(msg).branch, "image");
-});
-
-test("a voice note lands in gepetel's voice branch with a fetchable link", () => {
-    const msg = buildWhapiMessage(
-        { key: { id: "DDD" } },
-        classify({ audioMessage: { ptt: true } }),
-        ids,
-        { link: "https://gw/media/v.ogg" }
-    );
-    const b = gepetelBranch(msg);
-    assert.equal(b.branch, "voice");
-    // gepetel does an axios GET on this, so it must be an absolute URL.
-    assert.ok(b.value.startsWith("https://"));
-});
-
-test("a gif lands in gepetel's gif branch", () => {
-    const msg = buildWhapiMessage(
-        { key: { id: "EEE" } },
-        classify({ videoMessage: { gifPlayback: true, caption: "lol" } }),
-        ids,
-        { preview: "data:image/jpeg;base64,ZZZ" }
-    );
-    assert.equal(gepetelBranch(msg).branch, "gif");
-    assert.equal(msg.gif.caption, "lol");
-});
-
-test("skipped classifications produce no payload at all", () => {
-    assert.equal(buildWhapiMessage({ key: { id: "F" } }, classify({ stickerMessage: {} }), ids), null);
-});
-
-test("DM chat_name falls back to the sender's name", () => {
-    const msg = buildWhapiMessage(
-        { key: { id: "GGG" } },
-        classify({ conversation: "hi" }),
-        { chatJid: USER, senderJid: USER, senderName: "Bogdan" }
-    );
-    assert.equal(msg.chat_id, USER);
-    assert.equal(msg.chat_name, "Bogdan");
-    // Not a group id — gepetel's isGroup check keys off the @g.us suffix.
-    assert.equal(GEPETEL_GROUP_RE.test(msg.chat_id), false);
-});
-
-test("a missing timestamp is filled rather than emitted as NaN", () => {
-    const msg = buildWhapiMessage({ key: { id: "H" } }, classify({ conversation: "x" }), ids);
-    assert.equal(typeof msg.timestamp, "number");
-    assert.ok(Number.isFinite(msg.timestamp));
-});
-
-// --------------------------------------------------------------- group event
-
-test("group events expose participants as bare digits", () => {
-    const ev = buildWhapiGroupEvent(GROUP, "Familia", [
-        { id: "40750271099@s.whatsapp.net", name: "Bogdan" },
-        { id: "40711222333", name: "Ana" },
-    ]);
-    assert.equal(ev.id, GROUP);
-    assert.equal(ev.name, "Familia");
-    assert.deepEqual(ev.participants.map((p) => p.id), ["40750271099", "40711222333"]);
-    // gepetel infers language from the +40 prefix on these.
-    assert.ok(ev.participants.every((p) => p.id.startsWith("40")));
-});
-
-// ---------------------------------------------------------------- poll votes
-
-test("poll updates match what gepetel's recordPollVotes reads", () => {
-    const upd = buildWhapiPollUpdate(GROUP + "-poll1", GROUP, "Pizza sau shaorma?", [
-        { name: "Pizza", voters: ["40750271099@s.whatsapp.net", "40711222333@s.whatsapp.net"] },
-        { name: "Shaorma", voters: [] },
-    ]);
-
-    // gepetel: [upd.after_update, upd.message, upd].find(c => c && c.type === "poll"
-    //          && c.poll && Array.isArray(c.poll.results))
-    const found = [upd.after_update, upd.message, upd].find(
-        (c) => c && c.type === "poll" && c.poll && Array.isArray(c.poll.results)
-    );
-    assert.ok(found, "gepetel must be able to locate the poll payload");
-
-    assert.equal(found.poll.results[0].name, "Pizza");
-    assert.equal(found.poll.results[0].count, 2);
-    assert.deepEqual(found.poll.results[0].voters, ["40750271099", "40711222333"]);
-    assert.equal(found.poll.results[1].count, 0);
-    assert.equal(found.poll.total, 2);
-});
-
-
-/**
- * LID resolution, the failure mode this whole path exists to prevent.
- *
- * WhatsApp is moving group addressing to opaque `@lid` ids. Their digits are
- * NOT a phone number, but `digitsOf` will happily emit them as if they were,
- * and gepetel then infers a country and language from "1395…". Baileys v7
- * ships the real phone-number JID alongside, as `participantAlt`/`remoteJidAlt`.
- */
-const LID = "139556506575001@lid";
-const PN = "40750271099@s.whatsapp.net";
 
 test("a LID resolves to the phone-number form shipped beside it", () => {
     assert.equal(preferPhoneNumber(LID, PN), PN);

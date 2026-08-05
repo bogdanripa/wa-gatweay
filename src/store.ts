@@ -33,12 +33,6 @@ export interface SessionDoc {
      */
     phoneNumberId: string;
     /**
-     * Which dialect this number's webhook speaks. `cloud` mirrors Meta's Cloud
-     * API envelope; `whapi` is the older shape, kept for bots written against
-     * it. This is the one direction the two cannot both be true at once.
-     */
-    webhookFormat: "cloud" | "whapi";
-    /**
      * Last inbound message seen, persisted so a redeploy doesn't reset the
      * console's "is this working?" line to "never". Written at most once a
      * minute — it is a display marker, not an audit log.

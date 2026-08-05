@@ -119,14 +119,6 @@ export function generatePhoneNumberId(): string {
     return (digits[0] === "0" ? "1" : digits[0]) + digits.slice(1, 15);
 }
 
-function validateWebhookFormat(raw: unknown): "cloud" | "whapi" {
-    if (raw === undefined || raw === null || raw === "") return "cloud";
-    if (raw !== "cloud" && raw !== "whapi") {
-        throw new ValidationError('webhookFormat must be "cloud" or "whapi"');
-    }
-    return raw;
-}
-
 export function toSessionConfig(doc: SessionDoc): SessionConfig {
     return {
         id: doc._id,
@@ -135,7 +127,6 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         pairPhone: doc.pairPhone,
         sendRatePerMinute: doc.sendRatePerMinute,
         phoneNumberId: doc.phoneNumberId,
-        webhookFormat: doc.webhookFormat ?? "cloud",
     };
 }
 
@@ -144,14 +135,12 @@ export interface CreateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
-    webhookFormat?: unknown;
 }
 
 export interface UpdateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
-    webhookFormat?: unknown;
 }
 
 export class SessionStore {
@@ -167,10 +156,6 @@ export class SessionStore {
         for (const doc of docs) {
             const patch: Partial<SessionDoc> = {};
             if (!doc.phoneNumberId) patch.phoneNumberId = generatePhoneNumberId();
-            // Existing numbers keep the older dialect: they were paired against a
-            // bot that speaks it, and silently reshaping their webhook payloads
-            // would break that bot on the next deploy.
-            if (!doc.webhookFormat) patch.webhookFormat = "whapi";
             if (!Object.keys(patch).length) continue;
 
             Object.assign(doc, patch);
@@ -192,7 +177,6 @@ export class SessionStore {
             pairPhone: validatePairPhone(input.pairPhone),
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
             phoneNumberId: generatePhoneNumberId(),
-            webhookFormat: validateWebhookFormat(input.webhookFormat),
             createdAt: new Date(),
             updatedAt: new Date(),
         };
@@ -229,9 +213,6 @@ export class SessionStore {
             const phone = validatePairPhone(patch.pairPhone);
             if (phone) $set.pairPhone = phone;
             else $unset.pairPhone = "";
-        }
-        if (patch.webhookFormat !== undefined) {
-            $set.webhookFormat = validateWebhookFormat(patch.webhookFormat);
         }
         if (patch.sendRatePerMinute !== undefined) {
             const rate = validateRate(patch.sendRatePerMinute);

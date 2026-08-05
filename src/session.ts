@@ -14,13 +14,7 @@ import { scopedId, type Stores } from "./store.js";
 import { useMongoAuthState } from "./authState.js";
 import { MediaStore } from "./media.js";
 import { WebhookSender } from "./webhook.js";
-import {
-    buildWhapiGroupEvent,
-    buildWhapiMessage,
-    buildWhapiPollUpdate,
-    classify,
-    unwrap,
-} from "./map.js";
+import { classify, unwrap } from "./map.js";
 import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
@@ -558,16 +552,8 @@ export class Session {
         });
 
         const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined };
-
-        if (this.cfg.webhookFormat === "cloud") {
-            const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
-            if (event) await this.webhook.send(event);
-            return;
-        }
-
-        const payload = buildWhapiMessage(msg, cls, ids, media);
-        if (!payload) return;
-        await this.webhook.send({ messages: [payload] });
+        const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
+        if (event) await this.webhook.send(event);
     }
 
     /**
@@ -634,19 +620,13 @@ export class Session {
                 );
 
                 await this.webhook.send(
-                    this.cfg.webhookFormat === "cloud"
-                        ? buildCloudPollEvent(
-                              u.key.id,
-                              stored.remoteJid,
-                              stored.name,
-                              resolved,
-                              this.cloudMeta()
-                          )
-                        : {
-                              messages_updates: [
-                                  buildWhapiPollUpdate(u.key.id, stored.remoteJid, stored.name, resolved),
-                              ],
-                          }
+                    buildCloudPollEvent(
+                        u.key.id,
+                        stored.remoteJid,
+                        stored.name,
+                        resolved,
+                        this.cloudMeta()
+                    )
                 );
             } catch (e) {
                 this.log.error({ e, id: u.key?.id }, "poll update handling failed");
@@ -688,9 +668,7 @@ export class Session {
             const meta = known || (await this.getGroupMetadata(jid));
             const participants = await this.groupParticipantIds(meta);
             await this.webhook.send(
-                this.cfg.webhookFormat === "cloud"
-                    ? buildCloudGroupEvent(jid, meta.subject, participants, this.cloudMeta())
-                    : { groups: [buildWhapiGroupEvent(jid, meta.subject, participants)] }
+                buildCloudGroupEvent(jid, meta.subject, participants, this.cloudMeta())
             );
         } catch (e) {
             this.log.error({ e, jid }, "failed to emit group event");
@@ -727,11 +705,7 @@ export class Session {
         if (this.emittedContacts.size > 5000) this.emittedContacts.clear();
 
         if (!payload.length) return;
-        await this.webhook.send(
-            this.cfg.webhookFormat === "cloud"
-                ? buildCloudContactsEvent(payload, this.cloudMeta())
-                : { contacts: payload }
-        );
+        await this.webhook.send(buildCloudContactsEvent(payload, this.cloudMeta()));
     }
 
     // ----------------------------------------------------------------- outbound
@@ -1084,7 +1058,6 @@ export class Session {
             // "the API forgot to send it".
             webhookUrl: this.cfg.webhookUrl ?? null,
             phoneNumberId: this.cfg.phoneNumberId,
-            webhookFormat: this.cfg.webhookFormat,
             pairPhone: this.cfg.pairPhone,
             sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
             me: this.me,

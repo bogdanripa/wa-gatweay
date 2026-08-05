@@ -254,6 +254,16 @@ try {
         JSON.stringify(noWebhookJson?.number?.webhookUrl)
     );
     check(
+        "a number is given a Meta-style phone_number_id",
+        /^[1-9]\d{14}$/.test(noWebhookJson?.number?.phoneNumberId || ""),
+        noWebhookJson?.number?.phoneNumberId
+    );
+    check(
+        "there is no webhook dialect to choose any more",
+        !("webhookFormat" in (noWebhookJson?.number || {})),
+        JSON.stringify(Object.keys(noWebhookJson?.number || {}))
+    );
+    check(
         "…with no rate cap, since none was given",
         noWebhookJson?.number?.sendRatePerMinute === null,
         JSON.stringify(noWebhookJson?.number?.sendRatePerMinute)

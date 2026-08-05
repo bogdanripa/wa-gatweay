@@ -82,15 +82,6 @@
           awkward. Leave empty to scan a QR instead.</small>
       </label>
       <label>
-        <span>Webhook format</span>
-        <select name="webhookFormat">
-          <option value="cloud">WhatsApp Cloud API</option>
-          <option value="whapi">whapi (legacy)</option>
-        </select>
-        <small>The shape of the JSON posted to your webhook. Cloud matches Meta's envelope,
-          so a bot written for the WhatsApp Business Cloud API works unchanged.</small>
-      </label>
-      <label>
         <span>Send rate / minute <span class="muted">(optional)</span></span>
         <input name="sendRatePerMinute" type="number" min="1" max="600" placeholder="no limit">
         <small>Ceiling on outbound messages. Leave empty for no limit.</small>

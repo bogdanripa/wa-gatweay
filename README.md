@@ -4,8 +4,8 @@ A self-hosted, whapi.cloud-compatible WhatsApp gateway built on [Baileys](https:
 
 It owns the WhatsApp sessions and speaks two protocols:
 
-- **Outbound (bot → gateway):** the same REST endpoints whapi exposes, same paths, same request bodies, same response shapes.
-- **Inbound (gateway → bot):** the same webhook payloads whapi POSTs to `/whapi`.
+- **Outbound (bot → gateway):** WhatsApp Cloud API request bodies and responses, plus the older whapi-shaped send routes.
+- **Inbound (gateway → bot):** WhatsApp Cloud API webhook payloads — the `entry/changes/value` envelope, with `group_id` on group messages.
 
 ```
                         ┌─ session "gepetel"    ⇄ WhatsApp #1 ─┐  POST /whapi   ┌─ gepetel (GCP)

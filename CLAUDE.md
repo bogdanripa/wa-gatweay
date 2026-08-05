@@ -68,9 +68,11 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 
 **Connection alerts must stay quiet to stay useful.** `alerts.ts` deliberately does *not* fire on every disconnect: WhatsApp drops sockets constantly and Baileys reconnects within seconds, so a naive alert-on-close trains the operator to ignore it within an hour. The grace period, the immediate path for `logged-out`/`conflict`, and the "never connected is not an incident" rule are the whole point — don't simplify them away. A failed alert must never take down the thing it is watching, which is why every send is caught.
 
-**Two outbound dialects, one webhook dialect per number.** `cloud.ts` implements Meta's WhatsApp Cloud API shapes; `map.ts` implements the older whapi ones. Sending supports both permanently — they're different routes, so there's no conflict. The webhook direction can only be one shape at a time, hence `SessionDoc.webhookFormat`, defaulting to `cloud` for new numbers and backfilled to `whapi` for numbers that predate it (they were paired against a bot that speaks it).
+**Webhooks are WhatsApp Cloud API shaped, and only that.** `cloud.ts` builds every outbound event; the whapi payload builders are gone, along with the per-number dialect setting. Sending still accepts both surfaces — they're different routes, so there's no conflict — but a bot consuming webhooks reads Meta's envelope or nothing.
 
 `cloud.ts` is pure for the same reason `map.ts` is, and its tests assert against shapes lifted from Meta's own documentation — not against this code. That is the only thing that can prove the migration promise.
+
+`map.ts` is now just `classify`/`unwrap`: what kind of message is this, and what must be fetched before forwarding. It no longer knows any payload shape.
 
 The Cloud route's path segment (`/<PHONE_NUMBER_ID>/messages`) is deliberately **not** used for routing: the token already identifies one number, which is what makes migrating a base-URL change. It is still checked against *other* numbers' identifiers, because a segment naming a different configured number is a real misconfiguration rather than a harmless one.
 
