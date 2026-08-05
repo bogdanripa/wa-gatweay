@@ -54,6 +54,21 @@ const bearerOf = (req: Request): string => {
     return hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
 };
 
+/**
+ * A request this gateway refused, logged.
+ *
+ * Rejections used to be silent: the explicit 400s returned without a word, so a
+ * client sending a shape we don't accept produced no trace anywhere. A bot that
+ * quietly falls back — a poll degrading to a numbered list, say — then looks
+ * like a bot bug, and the gateway looks fine. It cost a debugging session.
+ *
+ * `warn`, not `error`: it is the caller's mistake, not a fault here. The body is
+ * deliberately not logged — it carries message content.
+ */
+const refused = (req: Request, reason: string) => {
+    logger.warn({ method: req.method, path: req.path, reason }, "request refused");
+};
+
 const fail = (res: Response, e: unknown, code = 500) => {
     const message = e instanceof Error ? e.message : String(e);
     // Rejected input is the caller's problem and shouldn't read as a gateway
@@ -126,6 +141,7 @@ export function makeApiRouter(manager: SessionManager): Router {
         try {
             const { to, body } = req.body || {};
             if (!to || typeof body !== "string") {
+                refused(req, "to and body are required");
                 res.status(400).json({ error: { message: "to and body are required" } });
                 return;
             }
@@ -140,6 +156,7 @@ export function makeApiRouter(manager: SessionManager): Router {
         try {
             const { to, media, caption } = req.body || {};
             if (!to || !media) {
+                refused(req, "to and media are required");
                 res.status(400).json({ error: { message: "to and media are required" } });
                 return;
             }
@@ -158,6 +175,7 @@ export function makeApiRouter(manager: SessionManager): Router {
                 .map((o: any) => String(o ?? "").trim())
                 .filter(Boolean);
             if (!to || !name || options.length < 2) {
+                refused(req, "to, poll.name and >=2 poll.options are required");
                 res.status(400).json({
                     error: { message: "to, poll.name and >=2 poll.options are required" },
                 });
@@ -183,6 +201,7 @@ export function makeApiRouter(manager: SessionManager): Router {
         try {
             const emoji = req.body?.emoji;
             if (typeof emoji !== "string") {
+                refused(req, "emoji is required");
                 res.status(400).json({ error: { message: "emoji is required" } });
                 return;
             }
@@ -196,6 +215,7 @@ export function makeApiRouter(manager: SessionManager): Router {
     router.put("/messages/:id", async (req: ApiRequest, res) => {
         try {
             if (req.body?.status !== "read") {
+                refused(req, "only { status: 'read' } is supported");
                 res.status(400).json({ error: { message: "only { status: 'read' } is supported" } });
                 return;
             }
@@ -236,6 +256,7 @@ export function makeApiRouter(manager: SessionManager): Router {
             res.json(buildCloudSendResponse(request.to || waId, waId, messageId));
         } catch (e) {
             if (e instanceof CloudRequestError) {
+                refused(req, `${e.message}${e.details ? ` — ${e.details}` : ""}`);
                 res.status(400).json(buildCloudError(e));
                 return;
             }

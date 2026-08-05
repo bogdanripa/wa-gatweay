@@ -61,6 +61,7 @@ export type CloudSendKind =
     | { type: "sticker"; media: string }
     | { type: "reaction"; messageId: string; emoji: string }
     | { type: "location"; latitude: number; longitude: number; name?: string; address?: string }
+    | { type: "poll"; name: string; options: string[]; allowMultiple: boolean }
     | { type: "read"; messageId: string; typing: boolean };
 
 export interface CloudSendRequest {
@@ -199,6 +200,34 @@ export function parseCloudSendRequest(body: any): CloudSendRequest {
                 kind: { type: "location", latitude: lat, longitude: lng, name: content?.name, address: content?.address },
             };
         }
+        // Not a Meta type — Meta's Cloud API cannot send a poll at all. WhatsApp
+        // can, this gateway can, and refusing to express that would mean anyone
+        // adopting the Cloud shape silently loses polls and falls back to
+        // posting a numbered list as text. Extended here for the same reason the
+        // `message_polls` webhook field exists on the receive side.
+        case "poll": {
+            const name = content?.name;
+            const options: string[] = (content?.options || [])
+                .map((o: any) => String(o ?? "").trim())
+                .filter(Boolean);
+            if (typeof name !== "string" || !name || options.length < 2) {
+                throw new CloudRequestError(
+                    "(#100) Missing or invalid parameter: poll",
+                    100,
+                    "poll.name must be a non-empty string and poll.options at least two entries."
+                );
+            }
+            return {
+                to,
+                recipientType,
+                kind: {
+                    type: "poll",
+                    name,
+                    options,
+                    allowMultiple: !!content?.allow_multiple_answers,
+                },
+            };
+        }
         case "template":
             throw new CloudRequestError(
                 "(#100) Unsupported parameter: template",
@@ -211,7 +240,7 @@ export function parseCloudSendRequest(body: any): CloudSendRequest {
                 `(#100) Missing or invalid parameter: type`,
                 100,
                 `"${type}" is not a supported message type here. Supported: text, image, ` +
-                    `audio, video, document, sticker, reaction, location.`
+                    `audio, video, document, sticker, reaction, location, poll.`
             );
     }
 }

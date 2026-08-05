@@ -809,6 +809,10 @@ export class Session {
                 await this.react(k.messageId, k.emoji);
                 return { messageId: k.messageId, waId };
             }
+            case "poll": {
+                const sent = await this.sendPoll(req.to, k.name, k.options, k.allowMultiple);
+                return { messageId: sent.id, waId };
+            }
             case "audio":
             case "video":
             case "document":

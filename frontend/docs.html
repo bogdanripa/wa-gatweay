@@ -130,6 +130,19 @@
   "location": { "latitude": 51.5000, "longitude": -0.1200,
                 "name": "Example Place", "address": "1 Example Street" } }</code></pre>
 
+  <h3>Poll</h3>
+  <div class="note">
+    <strong>An extension.</strong> Meta's Cloud API has no poll type — it cannot send
+    one at all. WhatsApp can, so this is expressed in the same style rather than left
+    out; a client that adopts the Cloud shape and expects polls would otherwise have to
+    fall back to posting a numbered list as text. Results arrive on the
+    <a href="#poll-updates"><code>message_polls</code></a> webhook field.
+  </div>
+  <pre><code>{ … "type": "poll",
+  "poll": { "name": "Lunch?",
+            "options": ["Pizza", "Sushi", "Neither"],
+            "allow_multiple_answers": false } }</code></pre>
+
   <h3>Reaction</h3>
   <pre><code>{ … "type": "reaction",
   "reaction": { "message_id": "3EB0…", "emoji": "👍" } }   // "" removes it</code></pre>
@@ -381,6 +394,11 @@
         <td>Group creation, invite links, join approval</td>
         <td>Dedicated endpoints</td>
         <td>Not supported — create and join on the phone</td>
+      </tr>
+      <tr>
+        <td>Polls</td>
+        <td>No poll type — cannot send one</td>
+        <td><code>type: "poll"</code>, with tallies on a webhook</td>
       </tr>
       <tr>
         <td>Media</td>

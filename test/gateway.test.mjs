@@ -390,3 +390,55 @@ test("group participant events use Meta's group_participants_update field", () =
     assert.equal(group.subject, "Team");
     assert.deepEqual(group.participants, [{ wa_id: "12025550100", name: "Bogdan" }]);
 });
+
+test("a poll is sendable through the Cloud shape, which Meta has no type for", () => {
+    // Meta cannot send a poll at all. WhatsApp can, so refusing to express it
+    // would mean adopting the Cloud shape silently costs you polls — which is
+    // exactly what happened: a bot fell back to posting a numbered list as text.
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        recipient_type: "group",
+        to: GROUP,
+        type: "poll",
+        poll: { name: "Lunch?", options: ["Pizza", "Sushi"], allow_multiple_answers: true },
+    });
+    assert.equal(req.recipientType, "group");
+    assert.deepEqual(req.kind, {
+        type: "poll",
+        name: "Lunch?",
+        options: ["Pizza", "Sushi"],
+        allowMultiple: true,
+    });
+});
+
+test("allow_multiple_answers defaults to false, as a single-choice poll", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A", "B"] },
+    });
+    assert.equal(req.kind.allowMultiple, false);
+});
+
+test("a one-option poll is refused rather than sent as something else", () => {
+    assert.throws(() => parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["only-one"] },
+    }), /poll/);
+});
+
+test("blank poll options are dropped before the two-option check", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A", "  ", "B", ""] },
+    });
+    assert.deepEqual(req.kind.options, ["A", "B"]);
+});
+
+test("the unsupported-type error names poll as available", () => {
+    try {
+        parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "interactive" });
+        assert.fail("should have thrown");
+    } catch (e) {
+        assert.match(e.details, /poll/);
+    }
+});
