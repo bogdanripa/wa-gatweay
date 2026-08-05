@@ -391,32 +391,78 @@ test("group participant events use Meta's group_participants_update field", () =
     assert.deepEqual(group.participants, [{ wa_id: "12025550100", name: "Bogdan" }]);
 });
 
-test("a poll is sendable through the Cloud shape, which Meta has no type for", () => {
-    // Meta cannot send a poll at all. WhatsApp can, so refusing to express it
-    // would mean adopting the Cloud shape silently costs you polls — which is
-    // exactly what happened: a bot fell back to posting a numbered list as text.
+/**
+ * Polls, which Meta's Cloud API cannot send at all.
+ *
+ * There is no official shape to match, so these assert the one we publish —
+ * `selectable_count` is WhatsApp's own wire field (`selectableOptionsCount`),
+ * and Baileys sends a single-select poll for exactly 1 and a multiple-choice
+ * one otherwise. That mapping is the whole contract.
+ */
+test("the documented poll body parses", () => {
     const req = parseCloudSendRequest({
         messaging_product: "whatsapp",
         recipient_type: "group",
         to: GROUP,
         type: "poll",
-        poll: { name: "Lunch?", options: ["Pizza", "Sushi"], allow_multiple_answers: true },
+        poll: { name: "Birou?", options: ["Da", "Nu"], selectable_count: 1 },
     });
     assert.equal(req.recipientType, "group");
     assert.deepEqual(req.kind, {
         type: "poll",
-        name: "Lunch?",
-        options: ["Pizza", "Sushi"],
-        allowMultiple: true,
+        name: "Birou?",
+        options: ["Da", "Nu"],
+        selectableCount: 1,
     });
 });
 
-test("allow_multiple_answers defaults to false, as a single-choice poll", () => {
+test("selectable_count passes through verbatim — pick up to 2 of 5", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["a","b","c","d","e"], selectable_count: 2 },
+    });
+    // Neither Meta nor an inverted 0-means-unlimited convention can express this.
+    assert.equal(req.kind.selectableCount, 2);
+});
+
+test("a poll defaults to single-answer", () => {
     const req = parseCloudSendRequest({
         messaging_product: "whatsapp", to: "1", type: "poll",
         poll: { name: "Pick", options: ["A", "B"] },
     });
-    assert.equal(req.kind.allowMultiple, false);
+    assert.equal(req.kind.selectableCount, 1);
+});
+
+test("allow_multiple_answers means as many as there are", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A", "B", "C"], allow_multiple_answers: true },
+    });
+    assert.equal(req.kind.selectableCount, 3);
+});
+
+test("selectable_count wins over the convenience boolean", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A","B","C"], selectable_count: 2, allow_multiple_answers: true },
+    });
+    assert.equal(req.kind.selectableCount, 2);
+});
+
+test("selectable_count of 0 is refused, not read as unlimited", () => {
+    // The inverted convention other APIs use. Accepting it silently would make
+    // "unset" and "unlimited" the same value.
+    assert.throws(() => parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A", "B"], selectable_count: 0 },
+    }), /selectable_count/);
+});
+
+test("selectable_count above the option count is refused", () => {
+    assert.throws(() => parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "1", type: "poll",
+        poll: { name: "Pick", options: ["A", "B"], selectable_count: 5 },
+    }), /selectable_count/);
 });
 
 test("a one-option poll is refused rather than sent as something else", () => {

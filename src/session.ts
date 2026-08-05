@@ -810,7 +810,7 @@ export class Session {
                 return { messageId: k.messageId, waId };
             }
             case "poll": {
-                const sent = await this.sendPoll(req.to, k.name, k.options, k.allowMultiple);
+                const sent = await this.sendPoll(req.to, k.name, k.options, k.selectableCount);
                 return { messageId: sent.id, waId };
             }
             case "audio":
@@ -883,11 +883,16 @@ export class Session {
         return { id: sent?.key?.id || undefined };
     }
 
+    /**
+     * `selectableCount` is how many options one voter may pick, passed straight
+     * through to WhatsApp. Baileys sends a single-select poll for exactly 1 and a
+     * multiple-choice one otherwise, so this is the whole control.
+     */
     async sendPoll(
         to: string,
         name: string,
         options: string[],
-        allowMultiple: boolean
+        selectableCount: number
     ): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
@@ -895,12 +900,7 @@ export class Session {
         if (!jid) throw new Error(`unroutable recipient: ${to}`);
 
         const sent = await sock.sendMessage(jid, {
-            poll: {
-                name,
-                values: options,
-                // WhatsApp encodes "multi-select" as a selectableCount of 0.
-                selectableCount: allowMultiple ? 0 : 1,
-            },
+            poll: { name, values: options, selectableCount },
         });
         if (!sent?.key?.id) throw new Error("poll send returned no message id");
 

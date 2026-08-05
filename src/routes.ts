@@ -185,7 +185,9 @@ export function makeApiRouter(manager: SessionManager): Router {
                 String(to),
                 String(name),
                 options,
-                !!poll?.allow_multiple_answers
+                // This route's boolean, mapped onto the count WhatsApp actually
+                // takes: everything, or exactly one.
+                poll?.allow_multiple_answers ? options.length : 1
             );
             // Both `message.id` and a bare `id` are returned: clients differ.
             res.json({ sent: true, message: { id: sent.id }, id: sent.id });

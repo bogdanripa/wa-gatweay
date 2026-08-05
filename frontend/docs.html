@@ -132,16 +132,44 @@
 
   <h3>Poll</h3>
   <div class="note">
-    <strong>An extension.</strong> Meta's Cloud API has no poll type — it cannot send
-    one at all. WhatsApp can, so this is expressed in the same style rather than left
-    out; a client that adopts the Cloud shape and expects polls would otherwise have to
-    fall back to posting a numbered list as text. Results arrive on the
-    <a href="#poll-updates"><code>message_polls</code></a> webhook field.
+    <strong>An extension — Meta has no poll type.</strong> The Cloud API cannot send a
+    poll at all, so there is no official shape to match and this one is ours. It follows
+    Meta's conventions exactly — a top-level object named after the <code>type</code>,
+    snake_case fields — so it reads like the rest of the API, and
+    <code>selectable_count</code> is WhatsApp's own wire field
+    (<code>selectableOptionsCount</code>) rather than an invention. Results come back on
+    the <a href="#poll-updates"><code>message_polls</code></a> webhook field.
   </div>
-  <pre><code>{ … "type": "poll",
-  "poll": { "name": "Lunch?",
-            "options": ["Pizza", "Sushi", "Neither"],
-            "allow_multiple_answers": false } }</code></pre>
+  <pre><code><span class="m">POST</span> /&lt;PHONE_NUMBER_ID&gt;/messages
+{ "messaging_product": "whatsapp",
+  "recipient_type": "group",
+  "to": "120363000000000000@g.us",
+  "type": "poll",
+  "poll": {
+    "name": "Lunch?",
+    "options": ["Pizza", "Sushi", "Neither"],
+    "selectable_count": 1
+  } }</code></pre>
+
+  <table>
+    <thead><tr><th>field</th><th></th></tr></thead>
+    <tbody>
+      <tr><td><code>name</code></td><td>The question. Required.</td></tr>
+      <tr><td><code>options</code></td><td>Two or more answers. Blank entries are dropped before that check.</td></tr>
+      <tr><td><code>selectable_count</code></td><td>How many options one person may pick.
+        <code>1</code> is a single-answer poll; the option count lets anyone pick all of
+        them; anything between is a real limit — "choose up to 2 of 5" is just
+        <code>2</code>. Defaults to <code>1</code>.</td></tr>
+      <tr><td><code>allow_multiple_answers</code></td><td>Accepted as a convenience if you
+        have a boolean to hand: <code>true</code> means the option count. Ignored when
+        <code>selectable_count</code> is given.</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">
+    Note it is <em>not</em> the inverted "<code>0</code> means unlimited" convention some
+    APIs use — <code>0</code> is indistinguishable from unset and reads as a bug at every
+    call site.
+  </p>
 
   <h3>Reaction</h3>
   <pre><code>{ … "type": "reaction",

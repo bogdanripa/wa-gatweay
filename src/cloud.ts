@@ -61,7 +61,7 @@ export type CloudSendKind =
     | { type: "sticker"; media: string }
     | { type: "reaction"; messageId: string; emoji: string }
     | { type: "location"; latitude: number; longitude: number; name?: string; address?: string }
-    | { type: "poll"; name: string; options: string[]; allowMultiple: boolean }
+    | { type: "poll"; name: string; options: string[]; selectableCount: number }
     | { type: "read"; messageId: string; typing: boolean };
 
 export interface CloudSendRequest {
@@ -217,16 +217,38 @@ export function parseCloudSendRequest(body: any): CloudSendRequest {
                     "poll.name must be a non-empty string and poll.options at least two entries."
                 );
             }
-            return {
-                to,
-                recipientType,
-                kind: {
-                    type: "poll",
-                    name,
-                    options,
-                    allowMultiple: !!content?.allow_multiple_answers,
-                },
-            };
+            // `selectable_count` is WhatsApp's own encoding: how many options one
+            // person may pick. It passes straight through to the protocol, so it
+            // expresses things neither Meta nor the older APIs can — "choose up
+            // to 2 of 5" is just `2`.
+            //
+            // `allow_multiple_answers` is accepted as a convenience for clients
+            // written against the boolean, and means "as many as there are".
+            // Deliberately NOT the inverted `0 means unlimited` convention: 0 is
+            // indistinguishable from "unset" and reads as a bug at every call site.
+            const raw = content?.selectable_count;
+            let selectableCount: number;
+            if (raw !== undefined && raw !== null && raw !== "") {
+                selectableCount = Number(raw);
+                if (!Number.isInteger(selectableCount) || selectableCount < 1) {
+                    throw new CloudRequestError(
+                        "(#100) Missing or invalid parameter: poll.selectable_count",
+                        100,
+                        "selectable_count is how many options one person may pick: at least 1."
+                    );
+                }
+                if (selectableCount > options.length) {
+                    throw new CloudRequestError(
+                        "(#100) Missing or invalid parameter: poll.selectable_count",
+                        100,
+                        `selectable_count (${selectableCount}) cannot exceed the ${options.length} options given.`
+                    );
+                }
+            } else {
+                selectableCount = content?.allow_multiple_answers ? options.length : 1;
+            }
+
+            return { to, recipientType, kind: { type: "poll", name, options, selectableCount } };
         }
         case "template":
             throw new CloudRequestError(
