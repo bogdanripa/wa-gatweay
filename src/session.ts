@@ -485,6 +485,20 @@ export class Session {
         }
     }
 
+    /**
+     * When WhatsApp says the message was sent.
+     *
+     * NOT `new Date()`. Those agree for a message arriving on a live socket, and
+     * disagree badly for everything WhatsApp queued while the socket was down —
+     * it delivers the whole backlog as live `notify` events on reconnect, so
+     * stamping them with our own clock dates an hour-old message to the moment
+     * of the last redeploy.
+     */
+    private static sentAt(msg: WAMessage): Date {
+        const seconds = Number(msg.messageTimestamp);
+        return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
+    }
+
     private async handleMessage(msg: WAMessage) {
         if (!msg.key?.remoteJid) return;
         if (msg.key.remoteJid === "status@broadcast") return;
@@ -499,8 +513,14 @@ export class Session {
             // would mean a metadata fetch WhatsApp rate-limits, for a message
             // nobody downstream will ever see.
             this.noteInbound({
+                at: Session.sentAt(msg),
                 from: digitsOf(msg.key.participant || msg.participant || msg.key.remoteJid),
                 fromName: msg.pushName || undefined,
+                // Cache-only: a subject we already hold costs nothing, and the
+                // alternative is showing "in a group" with no idea which. What it
+                // must not do is trigger a metadata fetch — WhatsApp rate-limits
+                // those hard, and this is a message nobody downstream will see.
+                chatName: this.groupCache.get(msg.key.remoteJid)?.meta.subject,
                 isGroup: isGroupJid(msg.key.remoteJid),
             });
             this.log.debug(
@@ -545,6 +565,7 @@ export class Session {
             : undefined;
 
         this.noteInbound({
+            at: Session.sentAt(msg),
             from: toUserId(senderJid),
             fromName: msg.pushName || undefined,
             chatName,
@@ -578,8 +599,14 @@ export class Session {
         };
     }
 
-    private noteInbound(m: { from: string; fromName?: string; chatName?: string; isGroup: boolean }) {
-        this.lastMessage = { at: new Date(), ...m };
+    private noteInbound(m: {
+        at: Date;
+        from: string;
+        fromName?: string;
+        chatName?: string;
+        isGroup: boolean;
+    }) {
+        this.lastMessage = { ...m };
         this.messagesReceived++;
 
         // Persisted so a redeploy doesn't reset the answer to "never", but at
