@@ -54,7 +54,18 @@ EXPOSE 80
 # builds the container's real check from that, and this line is only the fallback
 # for when that configuration didn't land. Two different paths means whichever
 # check runs is testing a route nobody meant.
+# `--start-interval` is the delay before the FIRST probe; `--interval` only
+# governs later ones. It defaults to 5s, so a container already serving in under
+# a second still isn't marked healthy until ~5.1s — and this app scales to zero,
+# where "healthy" is exactly what the platform waits on before releasing the
+# request that woke it. Measured on the target box, same image, this flag alone:
+# 5.27s → 0.52s to healthy, ~5.5s → ~0.76s end to end on a cold wake.
+#
+# It can only live here. Coolify's API has no field for it, `--health-*` is
+# dropped by its docker-run-to-compose conversion, and a zero start-period is
+# floored back to 10s. Needs Docker 25.0+ to build and run.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  --start-interval=250ms \
   CMD curl -fsS http://localhost:80/api/health || exit 1
 
 CMD ["node", "dist/server.js"]
