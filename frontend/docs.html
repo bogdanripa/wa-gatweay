@@ -34,7 +34,7 @@
     Every request goes to this gateway's base URL, which is this host plus
     <code>/api</code>:
   </p>
-  <pre><code id="base-url">https://wa-gateway-coolify.bogdanripa.com/api</code></pre>
+  <pre><code id="base-url">https://wa-gateway.example.com/api</code></pre>
   <p>
     Open the <a href="/console.html">console</a>, add a number, and scan the pairing QR
     with WhatsApp → Settings → Linked devices. The console shows a token for that
@@ -55,13 +55,13 @@
   -d '{
     "messaging_product": "whatsapp",
     "recipient_type": "individual",
-    "to": "40750271099",
+    "to": "12025550100",
     "type": "text",
     "text": { "body": "Hello from wa-gateway" }
   }'</code></pre>
   <pre><code>→ {
   "messaging_product": "whatsapp",
-  "contacts": [ { "input": "40750271099", "wa_id": "40750271099" } ],
+  "contacts": [ { "input": "12025550100", "wa_id": "12025550100" } ],
   "messages": [ { "id": "3EB0..." } ]
 }</code></pre>
   <p class="muted">
@@ -105,12 +105,12 @@
 
   <h3>Text</h3>
   <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "individual",
-  "to": "40750271099", "type": "text",
+  "to": "12025550100", "type": "text",
   "text": { "preview_url": false, "body": "Hello" } }</code></pre>
 
   <h3>To a group</h3>
   <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
-  "to": "120363012345678901@g.us", "type": "text",
+  "to": "120363000000000000@g.us", "type": "text",
   "text": { "body": "Hello everyone" } }</code></pre>
   <p class="muted">
     Any group the linked number belongs to. Meta's Groups API only addresses groups the
@@ -127,8 +127,8 @@
 
   <h3>Location</h3>
   <pre><code>{ … "type": "location",
-  "location": { "latitude": 44.4268, "longitude": 26.1025,
-                "name": "Bucharest", "address": "Romania" } }</code></pre>
+  "location": { "latitude": 51.5000, "longitude": -0.1200,
+                "name": "Example Place", "address": "1 Example Street" } }</code></pre>
 
   <h3>Reaction</h3>
   <pre><code>{ … "type": "reaction",
@@ -167,10 +167,10 @@
   <pre><code><span class="m">GET</span> /groups/&lt;group-id&gt;
 
 → {
-  "id": "120363012345678901@g.us",
+  "id": "120363000000000000@g.us",
   "name": "Team lunch",
   "subject": "Team lunch",
-  "participants": [ { "id": "40750271099", "name": "Bogdan" }, … ],
+  "participants": [ { "id": "12025550100", "name": "Alex Doe" }, … ],
   "participants_count": 12
 }</code></pre>
   <p>
@@ -218,12 +218,12 @@
       "value": {
         "messaging_product": "whatsapp",
         "metadata": {
-          "display_phone_number": "40723418290",
+          "display_phone_number": "12025550199",
           "phone_number_id": "&lt;PHONE_NUMBER_ID&gt;"
         },
-        "contacts": [ { "profile": { "name": "Bogdan" }, "wa_id": "40750271099" } ],
+        "contacts": [ { "profile": { "name": "Alex Doe" }, "wa_id": "12025550100" } ],
         "messages": [ {
-          "from": "40750271099",
+          "from": "12025550100",
           "id": "3EB0…",
           "timestamp": "1754300000",
           "type": "text",
@@ -243,8 +243,8 @@
     <code>from</code> — exactly how Meta represents a group message:
   </p>
   <pre><code>"messages": [ {
-  "from": "40750271099",              // who sent it
-  "group_id": "120363012345678901@g.us",
+  "from": "12025550100",              // who sent it
+  "group_id": "120363000000000000@g.us",
   "id": "3EB0…", "timestamp": "1754300000",
   "type": "text", "text": { "body": "Hello everyone" }
 } ]</code></pre>
@@ -271,14 +271,14 @@
   <p>On Meta's <code>group_participants_update</code> field:</p>
   <pre><code>{ "field": "group_participants_update",
   "value": { …, "groups": [ {
-    "group_id": "120363012345678901@g.us",
+    "group_id": "120363000000000000@g.us",
     "subject": "Team lunch",
-    "participants": [ { "wa_id": "40750271099", "name": "Bogdan" } ]
+    "participants": [ { "wa_id": "12025550100", "name": "Alex Doe" } ]
   } ] } }</code></pre>
 
   <h3>Contacts</h3>
   <pre><code>{ "field": "contacts",
-  "value": { …, "contacts": [ { "profile": { "name": "Bogdan" }, "wa_id": "40750271099" } ] } }</code></pre>
+  "value": { …, "contacts": [ { "profile": { "name": "Alex Doe" }, "wa_id": "12025550100" } ] } }</code></pre>
   <p class="muted">Only sent when a name actually changes, not on every WhatsApp re-announcement.</p>
 
   <h3>Poll results</h3>
@@ -288,9 +288,9 @@
   </p>
   <pre><code>{ "field": "message_polls",
   "value": { …, "polls": [ {
-    "id": "3EB0…", "group_id": "120363012345678901@g.us",
+    "id": "3EB0…", "group_id": "120363000000000000@g.us",
     "name": "Lunch?", "total": 3,
-    "results": [ { "name": "Pizza", "count": 2, "voters": ["40750271099","40711111111"] } ]
+    "results": [ { "name": "Pizza", "count": 2, "voters": ["12025550100","12025550142"] } ]
   } ] } }</code></pre>
 
   <div class="note">
@@ -314,7 +314,7 @@
 
 <span class="m">GET</span> /ready    → 200 only when every number is connected, else 503
 { "ok": false, "connected": 2, "total": 3,
-  "sessions": [ { "id": "gepetel", "status": "connected" },
+  "sessions": [ { "id": "my-bot", "status": "connected" },
                 { "id": "second-bot", "status": "awaiting-pairing" } ] }</code></pre>
   <p class="muted">
     Both are public and deliberately carry no credentials. <code>/health</code> answers

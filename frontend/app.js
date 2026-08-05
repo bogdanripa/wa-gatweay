@@ -40,7 +40,7 @@ function timeAgo(iso) {
     return "just now";
 }
 
-/** "from Bogdan in Team lunch" — whatever of that we actually know. */
+/** "from Alex Doe in Team lunch" — whatever of that we actually know. */
 function describeSender(m) {
     const who = m.fromName || m.from || "someone";
     if (m.isGroup && m.chatName) return `from ${who} in ${m.chatName}`;
@@ -243,7 +243,7 @@ function editForm(n) {
                     name: "pairPhone",
                     inputmode: "numeric",
                     value: n.pairPhone || "",
-                    placeholder: "40750271099",
+                    placeholder: "12025550100",
                 }),
                 el("small", {
                     text:
