@@ -1,5 +1,5 @@
 import type { proto } from "baileys";
-import { isGroupJid, toWhapiChatId, toWhapiUserId } from "./jid.js";
+import { isGroupJid, toChatId, toUserId } from "./jid.js";
 import type { Classification, ResolvedIds, ResolvedMedia } from "./map.js";
 
 /**
@@ -278,9 +278,9 @@ export function buildCloudMessageEvent(
 ): Record<string, any> | null {
     if (cls.kind === "skip") return null;
 
-    const chatId = toWhapiChatId(ids.chatJid);
+    const chatId = toChatId(ids.chatJid);
     const isGroup = isGroupJid(chatId);
-    const from = toWhapiUserId(ids.senderJid);
+    const from = toUserId(ids.senderJid);
 
     const message: Record<string, any> = {
         from,
@@ -341,9 +341,9 @@ export function buildCloudGroupEvent(
     return envelope(meta, "group_participants_update", {
         groups: [
             {
-                group_id: toWhapiChatId(groupJid),
+                group_id: toChatId(groupJid),
                 subject,
-                participants: participants.map((p) => ({ wa_id: toWhapiUserId(p.id), name: p.name })),
+                participants: participants.map((p) => ({ wa_id: toUserId(p.id), name: p.name })),
             },
         ],
     });
@@ -374,14 +374,14 @@ export function buildCloudPollEvent(
     const results = votes.map((v) => ({
         name: v.name,
         count: v.voters.length,
-        voters: v.voters.map(toWhapiUserId),
+        voters: v.voters.map(toUserId),
     }));
-    const chatId = toWhapiChatId(chatJid);
+    const chatId = toChatId(chatJid);
     return envelope(meta, "message_polls", {
         polls: [
             {
                 id: messageId,
-                ...(isGroupJid(chatId) ? { group_id: chatId } : { recipient_id: toWhapiUserId(chatId) }),
+                ...(isGroupJid(chatId) ? { group_id: chatId } : { recipient_id: toUserId(chatId) }),
                 name: pollName,
                 total: results.reduce((s, r) => s + r.count, 0),
                 results,

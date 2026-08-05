@@ -14,27 +14,29 @@ import {
     buildCloudSendResponse,
     parseCloudSendRequest,
 } from "./cloud.js";
-import { toWaJid, toWhapiUserId } from "./jid.js";
+import { toWaJid, toUserId } from "./jid.js";
 
 /**
- * whapi.cloud-compatible REST surface.
+ * The REST surface.
  *
- * Every route here mirrors one gepetel already calls in its whapi.ts, with the
- * same path, the same request body and the same response shape — all relative to
- * the base URL the bot is configured with. That is the entire migration
- * strategy: point a bot's `WHAPI_BASE_URL` at this service and its WhatsApp code
- * is unchanged.
+ * Two families live here, deliberately:
  *
- * The base URL now carries an `/api` prefix, because Pironman proxies only
- * `/api/*` to the container and answers everything else from the static bundle
- * that serves the management console. The paths *below* the base are untouched,
- * which is the part gepetel actually hardcodes.
+ *   - `POST /<PHONE_NUMBER_ID>/messages` — WhatsApp Cloud API shaped, so a client
+ *     written against Meta's API works after a base-URL change and nothing else.
+ *   - the older per-verb routes below, kept because they cost nothing and some
+ *     clients are written against that style.
  *
- * Multi-number works the same way whapi's does: the bearer token selects the
- * channel. A bot sends its own token and reaches its own number — so adding a
- * second bot on a second number needs no code change on either side.
+ * Everything is relative to the base URL a client is configured with. That base
+ * carries an `/api` prefix, because the platform proxies only `/api/*` to the
+ * container and answers everything else from the static bundle serving the
+ * console. The paths *below* the base are what clients hardcode, so those are
+ * the contract.
  *
- * Endpoints implemented (all of gepetel's, nothing more):
+ * Multi-number routing is by bearer token: a bot sends its own token and reaches
+ * its own number, so adding a second bot on a second number needs no code change
+ * on either side.
+ *
+ * The per-verb routes:
  *   GET  /groups/:id            -> { participants, participants_count, name }
  *   POST /messages/text         { to, body }
  *   POST /messages/image        { to, media, caption }
@@ -102,18 +104,18 @@ export function makeApiRouter(manager: SessionManager): Router {
             const { meta, participants } = await sessionOf(req).groupInfo(jid);
             res.json({
                 id: req.params.groupId,
-                // gepetel reads `name` first, then falls back to `subject`.
+                // Both spellings are emitted: clients differ on which they read.
                 name: meta.subject || "",
                 subject: meta.subject || "",
                 participants: participants.map((p) => ({
-                    id: toWhapiUserId(p.id),
+                    id: toUserId(p.id),
                     name: p.name,
                 })),
                 participants_count: participants.length,
             });
         } catch (e) {
-            // gepetel treats null from getGroupInfo as "couldn't read it" and falls
-            // back to the roster in the event payload, so a 404 here is safe.
+            // A 404 reads as "couldn't fetch it", which a client can fall back from
+            // using the roster it already received in the group event.
             fail(res, e, 404);
         }
     });
@@ -167,11 +169,11 @@ export function makeApiRouter(manager: SessionManager): Router {
                 options,
                 !!poll?.allow_multiple_answers
             );
-            // gepetel reads res.data.message.id (falling back to res.data.id).
+            // Both `message.id` and a bare `id` are returned: clients differ.
             res.json({ sent: true, message: { id: sent.id }, id: sent.id });
         } catch (e) {
-            // gepetel falls back to a text poll when this fails, so failing loudly
-            // here degrades gracefully rather than losing the poll.
+            // Failing loudly lets a client fall back to a plain text poll rather
+            // than silently losing it.
             fail(res, e, 502);
         }
     });
@@ -250,7 +252,7 @@ export function makeApiRouter(manager: SessionManager): Router {
             await sessionOf(req).sendPresence(req.params.to, presence);
             res.json({ sent: true });
         } catch (e) {
-            // A failed typing indicator is cosmetic — gepetel ignores the result.
+            // A failed typing indicator is cosmetic; the result is ignorable.
             fail(res, e, 502);
         }
     });

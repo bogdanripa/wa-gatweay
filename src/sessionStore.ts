@@ -26,8 +26,8 @@ export class NotFoundError extends Error {}
  * edit it after creation.
  *
  * Lower-cased on the way in. Mongo `_id` matching is case-sensitive but the
- * gateway's own lookup map is not, and "gepetel" resolving to a session that
- * "Gepetel" cannot delete is exactly the kind of split-brain worth designing
+ * gateway's own lookup map is not, and "my-bot" resolving to a session that
+ * "My-Bot" cannot delete is exactly the kind of split-brain worth designing
  * out rather than handling.
  */
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;

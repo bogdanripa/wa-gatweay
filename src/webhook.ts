@@ -1,21 +1,20 @@
 import { logger } from "./log.js";
 
 /**
- * Delivers whapi-shaped events to one bot. Each session has its own instance, so
+ * Delivers events to one bot. Each session has its own instance, so
  * a slow or down bot backs up only its own number.
  *
  * Two properties matter here and both come from how the bots behave:
  *
- * 1. ORDERING. gepetel threads conversations through OpenAI response ids
- *    (`previousMessageId`), so messages arriving out of order corrupt the thread.
- *    Deliveries are therefore serialised through a single queue rather than
- *    fired concurrently.
+ * 1. ORDERING. A bot that threads a conversation — through a model's previous
+ *    response id, or its own state — is corrupted by messages arriving out of
+ *    order. Deliveries are therefore serialised through a single queue rather
+ *    than fired concurrently.
  *
- * 2. AT-LEAST-ONCE. gepetel already dedupes on message id
- *    (`markMessageProcessed`), which is exactly the guarantee whapi gave it —
- *    whapi redelivers on any timeout or 5xx. So retrying here is safe, and
- *    matching that behaviour means gepetel's idempotency code keeps earning its
- *    keep instead of going stale.
+ * 2. AT-LEAST-ONCE. Retries mean a consumer can see the same message twice, so
+ *    handlers must dedupe on message id. That is the same guarantee the hosted
+ *    APIs give — they redeliver on any timeout or 5xx — so a bot written against
+ *    one already does it, and the requirement is documented rather than hidden.
  */
 export class WebhookSender {
     private queue: Promise<void> = Promise.resolve();

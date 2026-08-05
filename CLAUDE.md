@@ -4,41 +4,34 @@ Context for working on this repo. Read `README.md` first for what it is and how 
 
 ## What this is
 
-A whapi.cloud-compatible WhatsApp gateway on Baileys, hosting N numbers in one process. It exists so [gepetel](https://github.com/bogdanripa/gepetel) (and other bots) can drop whapi.cloud for self-hosted infrastructure on a Raspberry Pi 5 running Pironman, **without changing their WhatsApp code**.
+A WhatsApp gateway on Baileys, hosting N numbers in one process, running on a Raspberry Pi 5 under Pironman. It exists so bots can drop a hosted WhatsApp API for self-hosted infrastructure **without changing their WhatsApp code**.
 
-The compatibility contract is the whole point. If you change a payload shape or an endpoint, you break a bot that isn't in this repo.
+The compatibility contract is the whole point. Every consumer is a separate codebase you cannot see from here, so a changed payload shape or endpoint breaks something you have no way to test.
 
-"Endpoint" means the path *below the base URL*. Everything is served under `/api` because Pironman routes only `/api/*` to a container and answers every other path from the static bundle — which is the management console. The bots' `WHAPI_BASE_URL` carries the prefix; `/messages/text` and the rest are untouched, and they must stay that way.
+"Endpoint" means the path *below the base URL*. Everything is served under `/api` because Pironman routes only `/api/*` to a container and answers every other path from the static bundle — which is the management console. A client's base URL carries the prefix; `/messages/text` and the rest are untouched below it, and they must stay that way.
 
-## The contract with gepetel
+## The contract with consumers
 
-gepetel is on GCP Cloud Functions and is *not* in this repo. Before touching `src/map.ts`, `src/jid.ts` or `src/routes.ts`, re-read what it actually consumes:
+Consumers are not in this repo, and there is no way to test against them from here. Two surfaces are load-bearing:
 
-**Inbound** (`app.ts`, `POST /whapi`) — the branch order matters, it's an if/else chain:
+**Outbound (bot → gateway).** `POST /<PHONE_NUMBER_ID>/messages` in WhatsApp Cloud API shape, plus the older per-verb routes (`/messages/text` and friends). Both are permanent. The path segment on the Cloud route is cosmetic — the bearer token identifies the number — which is what makes migrating a base-URL change.
 
-```
-message.text.body  →  message.gif.preview  →  message.image.preview (uses .link || .preview)
-  →  message.voice.link || message.audio.link  →  message.link_preview.title  →  ignored
-```
+**Inbound (gateway → bot).** WhatsApp Cloud API webhooks only: the `entry[].changes[].value` envelope, `metadata`, `contacts[].profile.name`, and `messages[]` with `group_id` set on group messages and the participant in `from`. `cloud.ts` owns every byte of this.
 
-Also reads: `id`, `from_me`, `chat_id`, `chat_name`, `from`, `from_name`, plus `groups[]`, `contacts[]` and `messages_updates[]` (poll tallies as `{name, count, voters}`).
+**Id formats.** Consumers reduce ids with `String(x).replace(/\D/g, "")`, guard group ids on something like `/^[\d-]{10,31}@g\.us$/`, and infer a country from the calling-code prefix. That last one is why an unresolved LID is dangerous rather than merely wrong — see below.
 
-**Outbound** (`whapi.ts`) — 7 endpoints, listed in the README table.
-
-**Id formats.** gepetel reduces every id with `String(x).replace(/\D/g, "")` and gates group ids on `/^[\d-]{10,31}@g\.us$/`. It infers each group's country, language and timezone from participant phone prefixes (`util.ts` `CALLING_CODES`), and hardcodes its own number in `BOT_PHONE_DIGITS`.
-
-`test/gateway.test.mjs` transcribes gepetel's branching logic and id handling directly into the test file, so the tests fail if payloads drift. **Keep it that way** — asserting against this code's own shape would prove nothing.
+`test/gateway.test.mjs` asserts the Cloud shapes against **examples taken from Meta's published documentation**, not against this code. **Keep it that way** — asserting against our own output would prove only that we are self-consistent, which is not the promise being made.
 
 ## Things that will bite you
 
-**LIDs.** WhatsApp is migrating identities from phone numbers to `…@lid`. An unresolved LID doesn't throw anywhere — it makes gepetel infer the wrong language for a group. This bit in production: senders arrived as `139556506575001`, which is a LID's digits, not a number.
+**LIDs.** WhatsApp is migrating identities from phone numbers to `…@lid`. An unresolved LID doesn't throw anywhere — it makes a consumer infer the wrong country for a group. This bit in production: senders arrived as `139556506575001`, which is a LID's digits, not a number.
 
 Resolve in this order, and don't drop a step:
 
 1. **`key.participantAlt` / `key.remoteJidAlt`** — Baileys v7 ships the phone-number form on the message key itself when the chat is LID-addressed. It's WhatsApp's own mapping, needs no lookup, and works on a cold start. `preferPhoneNumber` in `jid.ts` is this rule, and it's unit-tested.
 2. `GroupParticipant.phoneNumber` for rosters.
 3. `signalRepository.lidMapping.getPNForLID()`, which only works if the mapping store was populated — see the history-sync note below.
-4. Failing all that, warn loudly and pass the LID through unchanged. `toWhapiChatId` deliberately does not reshape it, so the bug stays visible.
+4. Failing all that, warn loudly and pass the LID through unchanged. `toChatId` deliberately does not reshape it, so the bug stays visible.
 
 Resolutions from step 1 are written back with `storeLIDPNMappings`, so later events that arrive without an alt (poll votes, rosters) hit the cache.
 
@@ -68,7 +61,7 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 
 **Connection alerts must stay quiet to stay useful.** `alerts.ts` deliberately does *not* fire on every disconnect: WhatsApp drops sockets constantly and Baileys reconnects within seconds, so a naive alert-on-close trains the operator to ignore it within an hour. The grace period, the immediate path for `logged-out`/`conflict`, and the "never connected is not an incident" rule are the whole point — don't simplify them away. A failed alert must never take down the thing it is watching, which is why every send is caught.
 
-**Webhooks are WhatsApp Cloud API shaped, and only that.** `cloud.ts` builds every outbound event; the whapi payload builders are gone, along with the per-number dialect setting. Sending still accepts both surfaces — they're different routes, so there's no conflict — but a bot consuming webhooks reads Meta's envelope or nothing.
+**Webhooks are WhatsApp Cloud API shaped, and only that.** `cloud.ts` builds every outbound event; the older payload builders are gone, along with the per-number dialect setting. Sending still accepts both surfaces — they're different routes, so there's no conflict — but a bot consuming webhooks reads Meta's envelope or nothing.
 
 `cloud.ts` is pure for the same reason `map.ts` is, and its tests assert against shapes lifted from Meta's own documentation — not against this code. That is the only thing that can prove the migration promise.
 
@@ -94,13 +87,13 @@ Meta's group support is narrower than it looks — its Groups API only addresses
 | `store.ts` | Mongo collections, TTL indexes, `scopedId` |
 | `sessionStore.ts` | **pure-ish** — session config CRUD + the validation rules |
 | `authState.ts` | Mongo-backed Baileys `AuthenticationState`, per session |
-| `jid.ts` | **pure** — JID ↔ whapi id conversion |
-| `map.ts` | **pure** — Baileys events → whapi payloads |
+| `jid.ts` | **pure** — JID ↔ emitted id conversion |
+| `map.ts` | **pure** — Baileys message → classification |
 | `session.ts` | one number: socket lifecycle, reconnect, inbound/outbound |
 | `sessions.ts` | SessionManager — token→session routing, runtime add/remove |
 | `media.ts` | download, decrypt, serve, sweep |
 | `webhook.ts` | serialised at-least-once delivery, one queue per session |
-| `routes.ts` | whapi-compatible REST + health/media + management API |
+| `routes.ts` | Cloud API + per-verb REST, health/media, management API |
 | `alerts.ts` | Telegram connection alerts, deliberately debounced |
 | `frontend/` | the console — plain HTML/CSS/JS, no build step |
 | `dev/serve.mjs` | local stand-in for Pironman's static + `/api` proxy split |
@@ -126,5 +119,5 @@ There is no test that sends a real WhatsApp message; that needs a paired account
 ## Conventions
 
 - TypeScript, ESM, `NodeNext` resolution — **imports need the `.js` extension**.
-- Comments explain *why*, especially where a choice looks odd (it usually encodes a gepetel constraint or a WhatsApp protocol quirk). Don't strip them.
+- Comments explain *why*, especially where a choice looks odd (it usually encodes a consumer constraint or a WhatsApp protocol quirk). Don't strip them.
 - Baileys is pinned to a release-candidate. Bump deliberately and re-read `lib/**/*.d.ts` rather than trusting memory — the v7 API moved a lot.

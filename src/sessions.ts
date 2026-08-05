@@ -15,9 +15,9 @@ import {
 /**
  * Owns every configured number and routes requests to the right one.
  *
- * Routing is by bearer token, exactly as whapi does it: each channel has its own
+ * Routing is by bearer token, as the hosted APIs do it: each number has its own
  * token, and the token is what identifies the channel. That's what makes this
- * transparent to the bots — gepetel already sends `Authorization: Bearer …`, so
+ * transparent to the bots — they already send `Authorization: Bearer …`, so
  * pointing a second bot at a second number is a config change on both sides and
  * no code change on either.
  *
@@ -102,7 +102,7 @@ export class SessionManager {
             session.applyConfig(toSessionConfig(doc));
             this.byToken.set(doc.token, session);
         }
-        logger.warn({ session: id }, "token rotated — the bot's WHAPI_TOKEN must be updated");
+        logger.warn({ session: id }, "token rotated — the bot's token must be updated");
         return doc;
     }
 

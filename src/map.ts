@@ -13,7 +13,7 @@ import type { proto } from "baileys";
 export type MediaKind = "image" | "gif" | "voice" | "audio";
 
 export interface Classification {
-    /** How gepetel should read this message. "skip" means don't forward at all. */
+    /** How a consumer should read this message. "skip" means don't forward at all. */
     kind: "text" | MediaKind | "link_preview" | "skip";
     /** Plain body text, when there is one. */
     text?: string;
@@ -55,7 +55,7 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
     if (m.extendedTextMessage) {
         const e = m.extendedTextMessage;
         const body = e.text || "";
-        // A link preview with no body of its own is the only case gepetel's
+        // A link preview with no body of its own is the only case a consumer's
         // link_preview branch can actually reach (text takes priority there).
         if (!body && e.matchedText) {
             return {
@@ -75,8 +75,8 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
     }
 
     if (m.videoMessage) {
-        // WhatsApp ships GIFs as videos with gifPlayback set. gepetel treats the
-        // two differently (it describes a GIF's thumbnail), so keep them apart.
+        // WhatsApp ships GIFs as videos with gifPlayback set. Consumers often
+        // treat the two differently, so keep them apart rather than flattening.
         const isGif = !!m.videoMessage.gifPlayback;
         return {
             kind: isGif ? "gif" : "skip",
@@ -91,7 +91,8 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
     }
 
     // Stickers, documents, contacts, locations, polls, reactions, protocol
-    // messages: gepetel has no branch for these and logs+skips them anyway.
+    // messages: there is no payload shape for these, so forwarding an empty
+    // envelope would only make a consumer log and discard it.
     return { kind: "skip" };
 }
 

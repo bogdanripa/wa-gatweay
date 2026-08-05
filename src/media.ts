@@ -19,14 +19,14 @@ const EXT: Record<string, string> = {
 };
 
 /**
- * whapi hands gepetel plain HTTPS links to media. Baileys hands you encrypted
+ * Consumers expect plain HTTPS links to media. Baileys hands you encrypted
  * blobs you must download and decrypt yourself.
  *
- * gepetel is on GCP and fetches these URLs server-side (`transcribeVoice` does an
- * axios GET; `getImageDescription` passes the URL straight to OpenAI), so the
- * link has to be publicly reachable — which is exactly what Pironman's public
- * HTTPS URL gives us. The path carries 32 bytes of entropy and the record is
- * TTL'd, so the exposure is a long random URL that expires, not an open bucket.
+ * These links get fetched server-side by whatever consumes them — commonly an
+ * image or transcription model, which will not send your headers — so they have
+ * to be publicly reachable. The path carries 24 bytes of entropy and the record
+ * is TTL'd, so the exposure is a long random URL that expires, not an open
+ * bucket.
  */
 export class MediaStore {
     constructor(private stores: Stores) {}
@@ -36,9 +36,9 @@ export class MediaStore {
     }
 
     /**
-     * Download one media message and return the URLs gepetel expects.
-     * Never throws — a failed download degrades to "no media", which gepetel
-     * already handles (it falls back to a placeholder description or skips).
+     * Download one media message and return a fetchable URL.
+     * Never throws — a failed download degrades to "no media", which a consumer
+     * handles far better than a missing message would.
      */
     async save(
         waMessage: WAMessage,
@@ -79,9 +79,9 @@ export class MediaStore {
 
             const link = `${config.mediaBaseUrl}/${id}`;
 
-            // Images and GIFs also carry a small JPEG thumbnail inline. gepetel's
-            // GIF branch reads only `preview`, so surface it as a data URI —
-            // that avoids a second HTTP hop for the thumbnail case.
+            // Images and GIFs also carry a small JPEG thumbnail inline. Surfacing it
+            // as a data URI avoids a second HTTP hop when the thumbnail is all a
+            // consumer needs.
             let preview: string | undefined;
             const thumb = (inner as any)?.jpegThumbnail as Uint8Array | undefined;
             if (thumb?.length) {

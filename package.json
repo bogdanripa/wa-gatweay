@@ -1,7 +1,7 @@
 {
   "name": "wa-gateway",
   "version": "1.0.0",
-  "description": "Self-hosted whapi.cloud-compatible WhatsApp gateway backed by Baileys. Drop-in replacement for gepetel's whapi dependency.",
+  "description": "Self-hosted WhatsApp gateway backed by Baileys, speaking the WhatsApp Cloud API. Host several numbers behind one HTTP API.",
   "type": "module",
   "main": "dist/server.js",
   "engines": {

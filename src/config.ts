@@ -25,9 +25,9 @@ function positiveInt(name: string, fallback: number): number {
 }
 
 /**
- * One WhatsApp number. The gateway hosts several, exactly like a whapi account
- * holds several channels — and, as with whapi, the bearer token is what selects
- * which one a request is for. That's why the bots need no change to work in a
+ * One WhatsApp number. The gateway hosts several, like a hosted account holds
+ * several channels — and, as there, the bearer token is what selects which one
+ * a request is for. That's why the bots need no change to work in a
  * multi-number deployment: they already send a token, they just get their own.
  *
  * These are no longer environment variables. They live in Mongo (see
@@ -57,12 +57,12 @@ export interface SessionConfig {
 /**
  * Pironman proxies only `/api/*` to an app's container; every other path is
  * answered by the static bundle without the container ever seeing it. So the
- * whole HTTP surface — the whapi-compatible endpoints included — lives under
+ * whole HTTP surface — every endpoint included — lives under
  * this prefix, and the bots' base URL carries it.
  *
- * The whapi contract is unchanged *relative to the base URL*: gepetel builds
- * every request as `${WHAPI_BASE_URL}/messages/text` and friends, so pointing
- * that at `https://…/api` is a config value, not a code change.
+ * The contract is unchanged *relative to the base URL*: a client builds every
+ * request as `${BASE_URL}/messages/text` and friends, so pointing that at
+ * `https://…/api` is a config value, not a code change.
  */
 export const API_PREFIX = "/api";
 

@@ -1,21 +1,21 @@
 # wa-gateway
 
-A self-hosted, whapi.cloud-compatible WhatsApp gateway built on [Baileys](https://github.com/whiskeysockets/Baileys). It replaces whapi for [gepetel](https://github.com/bogdanripa/gepetel) with an 8-line diff on gepetel itself, and hosts **several numbers at once** the same way a whapi account holds several channels.
+A self-hosted WhatsApp gateway built on [Baileys](https://github.com/whiskeysockets/Baileys), speaking the **WhatsApp Cloud API**. A bot written against Meta's API works after a base-URL change and nothing else, and one instance hosts **several numbers at once**, each with its own token.
 
 It owns the WhatsApp sessions and speaks two protocols:
 
-- **Outbound (bot → gateway):** WhatsApp Cloud API request bodies and responses, plus the older whapi-shaped send routes.
+- **Outbound (bot → gateway):** WhatsApp Cloud API request bodies and responses, plus a set of older per-verb send routes.
 - **Inbound (gateway → bot):** WhatsApp Cloud API webhook payloads — the `entry/changes/value` envelope, with `group_id` on group messages.
 
 ```
-                        ┌─ session "gepetel"    ⇄ WhatsApp #1 ─┐  POST /whapi   ┌─ gepetel (GCP)
+                        ┌─ session "alpha-bot" ⇄ WhatsApp #1 ─┐   webhook     ┌─ your bot
 wa-gateway (Pi 5) ──────┤                                       ├──────────────►│
-                        └─ session "second-bot" ⇄ WhatsApp #2 ─┘                └─ other bot (anywhere)
+                        └─ session "beta-bot"  ⇄ WhatsApp #2 ─┘                └─ another bot (anywhere)
                            ├─ Mongo-backed auth state, namespaced per session
                            └─ media downloaded, decrypted, served over HTTPS
 ```
 
-Routing is by bearer token, exactly as whapi does it. Each bot sends its own token and reaches its own number — which is why adding a second number is a config change on both sides and **no code change on either**.
+Routing is by bearer token, as the hosted APIs do it. Each bot sends its own token and reaches its own number — which is why adding a second number is a config change on both sides and **no code change on either**.
 
 Numbers are added, paired and removed from a web console at the deployment's root URL, without a redeploy. The gateway's own API sits under `/api` on the same host.
 
@@ -28,13 +28,13 @@ https://wa-gateway-coolify.bogdanripa.com/api    the gateway  ← bots point her
 
 ## Why it's a separate service
 
-gepetel is a stateless Cloud Function because whapi held the session for it. Baileys **is** the session — a long-lived WebSocket plus Signal protocol state. Those are incompatible runtimes, so the sessions live here and the bots stay as they are.
+A hosted API lets a bot be stateless, because the provider holds the WhatsApp session for it. Baileys **is** the session — a long-lived WebSocket plus Signal protocol state — which a request-scoped runtime cannot hold. So the sessions live here and the bots stay as they are.
 
 Three consequences worth internalising before you deploy:
 
 1. **Exactly one instance.** Two gateway instances on the same credentials fight over each device slot, and WhatsApp resolves that by logging you out. The gateway detects it (`connectionReplaced`) and deliberately *stops* that session rather than reconnecting into a flap war. Two sessions sharing an id would cause the same thing, so ids are unique by construction (they're the primary key) and tokens carry a unique index.
 2. **Auth state lives in Mongo, not on disk.** Pironman replaces the container on every redeploy. Baileys' bundled `useMultiFileAuthState` writes files, so with it you'd re-scan every QR after each deploy — and the Baileys docs say outright not to use it in production.
-3. **Media has to be re-hosted.** whapi handed the bots plain HTTPS links. Baileys hands you encrypted blobs. The gateway downloads, decrypts and serves them from its own public URL, which is what the bots and OpenAI fetch.
+3. **Media has to be re-hosted.** Consumers expect plain HTTPS links. Baileys hands you encrypted blobs. The gateway downloads, decrypts and serves them from its own public URL — which is what a bot, or a model it hands the URL to, actually fetches.
 
 ---
 
@@ -101,24 +101,22 @@ The whole design problem is noise. WhatsApp drops sockets constantly and Baileys
 - **`/api/health`** — liveness. 200 whenever the process is up, *including with zero numbers configured*, because Pironman gates deploys on it: a readiness check here would mean a fresh deployment could never go healthy long enough for anyone to add the first number. Counts only, no identifying detail — it is unauthenticated.
 - **`/api/ready`** — readiness. 503 until every configured number is connected, so one unpaired number can't hide behind a green light. This is the one to watch.
 
-### Switching a bot over
+### Pointing a bot at it
 
-Apply `gepetel-wa-gateway.patch` (8 changed lines — it swaps the hardcoded whapi host for a `WHAPI_BASE_URL` env var that defaults to whapi.cloud), then in GCP Secret Manager:
+Two configuration values, no code change:
 
 ```
-WHAPI_BASE_URL = https://wa-gateway-coolify.bogdanripa.com/api
-WHAPI_TOKEN    = <the token the console showed for that number>
+BASE_URL = https://<your-host>/api
+TOKEN    = <the token the console showed for that number>
 ```
 
-Note the `/api`. Every path *below* the base URL is byte-identical to whapi's, which is the part gepetel hardcodes; the base itself was already a variable, so this is a config value and not a code change.
-
-`WHAPI_TOKEN` keeps its name and is still sent as `Authorization: Bearer …`; it's just the gateway's token now, and it's what selects the number. **Rolling back is unsetting `WHAPI_BASE_URL`.** Keep the whapi channel alive for a week so that's a real option.
+Note the `/api`. Every path *below* the base URL is what a client hardcodes, and those are unchanged — so if a bot builds requests as `${BASE_URL}/…`, the base is the only thing that moves. If it hardcodes a provider's host instead, lifting that into a variable is the one edit required, and it makes rolling back a config change too.
 
 ---
 
 ## What's implemented
 
-Exactly gepetel's whapi surface, nothing more. Paths are relative to `WHAPI_BASE_URL`, which is `https://<host>/api`:
+Paths are relative to the base URL, which is `https://<host>/api`:
 
 | Endpoint | Used by the bot for |
 |---|---|
@@ -150,17 +148,17 @@ And the management API behind the console, all of it requiring `Authorization: B
 
 ## Design notes
 
-**LID resolution is the subtle one.** WhatsApp is migrating identities from phone numbers to LIDs (`…@lid`). gepetel infers each group's country, language and timezone from participant phone prefixes, so an unresolved LID doesn't crash it — it quietly makes it answer in the wrong language. Silent wrongness being the worst failure mode available, the gateway resolves LIDs aggressively (preferring the `phoneNumber` field Baileys puts on every participant, falling back to the Signal LID mapping store), logs a warning when it can't, and never reshapes a LID into something that merely *looks* like a phone number.
+**LID resolution is the subtle one.** WhatsApp is migrating identities from phone numbers to LIDs (`…@lid`). Consumers infer a group's country from participant phone prefixes, so an unresolved LID doesn't crash anything — it quietly makes them answer wrongly. Silent wrongness being the worst failure mode available, the gateway resolves LIDs aggressively (preferring the phone-number form Baileys ships on the message key itself, then a participant's `phoneNumber`, then the Signal LID mapping store), logs a warning when it can't, and never reshapes a LID into something that merely *looks* like a phone number.
 
-**Message keys are cached because whapi's API is id-only.** `PUT /messages/{id}` passes just an id, but Baileys needs the full key (`remoteJid`, `fromMe`, `participant`). Every message seen or sent gets its key stored in Mongo, scoped to its session, with a 7-day TTL.
+**Message keys are cached because the API is id-only.** `PUT /messages/{id}` passes just an id, but Baileys needs the full key (`remoteJid`, `fromMe`, `participant`). Every message seen or sent gets its key stored in Mongo, scoped to its session, with a 7-day TTL.
 
 **Poll creation messages are persisted** because vote updates arrive encrypted and can only be decrypted with the original message — which has to outlive the process.
 
-**Webhook delivery is serialised per session and retried.** gepetel threads conversations through OpenAI response ids, so out-of-order delivery corrupts the thread. Each session has its own queue, so a slow bot backs up only its own number. Retries are safe because gepetel already dedupes on message id — that was whapi's contract too, so matching it keeps gepetel's idempotency code honest rather than letting it rot.
+**Webhook delivery is serialised per session and retried.** A bot that threads a conversation is corrupted by out-of-order delivery, so each session has its own queue and a slow bot backs up only its own number. Retries mean a handler can see the same message twice — dedupe on message id, which is the same requirement every hosted API imposes.
 
 **Sessions fail independently.** One number with a corrupt auth document, a logout, or a conflict doesn't stop the others from starting or running.
 
-**Non-GIF videos, stickers and documents are dropped at the gateway.** gepetel has no branch for them and would hit its `console.error` + skip path on every one.
+**Non-GIF videos, stickers and documents are dropped at the gateway.** There is no payload shape for them, so forwarding an empty envelope would only make a consumer log and discard it.
 
 ---
 
@@ -172,7 +170,7 @@ npm test              # 28 unit tests — pure mappers
 npm run test:smoke    # 49 boot checks against a real mongod, two numbers
 ```
 
-The unit tests assert against **gepetel's actual branching logic**, transcribed from its `app.ts` into the test file, rather than against this code's own shape — so they fail if the payloads drift from what gepetel reads.
+The webhook and send-shape tests assert against **examples from Meta's published documentation**, not against this code's own output — so they fail if the payloads drift from what a Cloud API client expects. Asserting against our own shapes would prove only self-consistency.
 
 The smoke test boots the real server process with **no** numbers configured — a fresh deployment — then adds two through the management API and checks token routing, management-key enforcement, per-session credential isolation in Mongo, and that a deleted number takes its credentials with it while leaving the other's alone. It restarts the process to prove numbers added at runtime outlive the container, and boots several deliberately-broken configs to confirm they exit non-zero. Its QR check only passes when **both** numbers complete a live WebSocket handshake with WhatsApp.
 
@@ -191,7 +189,7 @@ That starts an in-memory mongod, the real gateway, and a local stand-in for Piro
 - **`/api/ready` is 503?** It tells you which number. Open the console — either it needs pairing or it's mid-reconnect.
 - **A session shows `conflict`?** Another client is using those credentials. Check for a second gateway instance, then hit **Restart** on its card.
 - **A session shows `logged-out`?** That device was unlinked from the phone. Only that session's credentials are wiped; use **Unlink & re-pair** on its card for a fresh QR.
-- **Lost a bot's token?** The console shows it — **Show token** on that number's card. If it leaked, **Rotate token** revokes it immediately, and the bot goes silent until its `WHAPI_TOKEN` is updated.
+- **Lost a bot's token?** The console shows it — **Show token** on that number's card. If it leaked, **Rotate token** revokes it immediately, and the bot goes silent until its token is updated.
 - **`FAILED TO PERSIST CREDENTIALS` in the logs?** Fix it immediately — that session won't survive the next restart.
 - **Disk filling up?** Media is swept hourly against `WA_MEDIA_TTL_HOURS`, but a chatty month of images across several numbers adds up on a Pi.
 

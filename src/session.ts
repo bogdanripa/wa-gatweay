@@ -32,8 +32,8 @@ import {
     preferPhoneNumber,
     stripDevice,
     toWaJid,
-    toWhapiChatId,
-    toWhapiUserId,
+    toChatId,
+    toUserId,
 } from "./jid.js";
 
 /**
@@ -214,7 +214,7 @@ export class Session {
             // initial LID↔phone-number mappings, and the contact/chat names. It
             // says so on connect ("DANGER: … PREVENTS BAILEYS FROM ACCESSING
             // INITIAL LID MAPPINGS"), and the symptom is senders arriving as raw
-            // LID digits that gepetel then reads as a phone number.
+            // LID digits that a consumer then reads as a phone number.
             //
             // So allow only the metadata types and still refuse the message
             // backfill, which is the part that actually burns Pi memory and Mongo
@@ -447,7 +447,7 @@ export class Session {
         //
         // Missing this was why senders arrived as raw LID digits: they aren't
         // phone numbers, but `digitsOf` will happily emit them as if they were,
-        // and gepetel then infers a country from "1395…".
+        // and a consumer then infers a country from "1395…".
         const altJid = preferPhoneNumber(j, alt);
         if (altJid) {
             // Teach the mapping store, so a later message that arrives without
@@ -521,8 +521,8 @@ export class Session {
             ? await this.resolveToPn(key.participant || msg.participant, key.participantAlt)
             : chatJid;
 
-        // Remember the key so whapi-style "act on this id" calls (mark read, react)
-        // can reconstruct it later — whapi's API only passes the bare id.
+        // Remember the key so "act on this id" calls (mark read, react) can
+        // reconstruct it later — the API only ever passes the bare id.
         await this.rememberKey(msg);
 
         let chatName: string | undefined;
@@ -545,7 +545,7 @@ export class Session {
             : undefined;
 
         this.noteInbound({
-            from: toWhapiUserId(senderJid),
+            from: toUserId(senderJid),
             fromName: msg.pushName || undefined,
             chatName,
             isGroup,
@@ -767,7 +767,7 @@ export class Session {
                 `"${req.to}" is not a phone number or group id this gateway can route to.`
             );
         }
-        const waId = isGroupJid(jid) ? toWhapiChatId(jid) : toWhapiUserId(jid);
+        const waId = isGroupJid(jid) ? toChatId(jid) : toUserId(jid);
 
         switch (k.type) {
             case "text": {
@@ -793,7 +793,7 @@ export class Session {
         }
     }
 
-    /** The media and location kinds that have no whapi-shaped equivalent. */
+    /** The media and location kinds with no per-verb route of their own. */
     private async sendCloudMedia(
         jid: string,
         k: Extract<CloudSendKind, { type: "audio" | "video" | "document" | "sticker" | "location" }>
@@ -837,8 +837,8 @@ export class Session {
         const jid = toWaJid(to);
         if (!jid) throw new Error(`unroutable recipient: ${to}`);
 
-        // The bots send a data: URI, an http(s) URL, or raw base64 (gepetel's
-        // sendWhatsAppImage wraps bare base64 into a data URI before calling).
+        // Callers send a data: URI, an http(s) URL, or raw base64 — all three are
+        // common enough in the wild that rejecting any of them is a papercut.
         let image: Buffer | { url: string };
         if (media.startsWith("http://") || media.startsWith("https://")) {
             image = { url: media };
@@ -982,7 +982,7 @@ export class Session {
     // ------------------------------------------------------------ message keys
 
     /**
-     * whapi's message APIs take a bare id (`PUT /messages/{id}`), but Baileys needs
+     * The message APIs take a bare id (`PUT /messages/{id}`), but Baileys needs
      * the full key — remoteJid, fromMe and participant. So every message we see or
      * send gets its key stored, scoped to this session and TTL'd to a week.
      */

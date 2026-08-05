@@ -1,17 +1,17 @@
 /**
- * Translation between Baileys JIDs and the id shapes gepetel already expects
- * from whapi. Pure functions only — everything here is unit-tested.
+ * Translation between Baileys JIDs and the id shapes this gateway emits.
+ * Pure functions only — everything here is unit-tested.
  *
- * gepetel's assumptions, read off its source:
- *   - group chat ids match /^[\d-]{10,31}@g\.us$/            (whapi.ts getGroupInfo)
- *   - participants are stored like "40711@s.whatsapp.net"    (mongo.ts:661 comment)
- *   - every id is reduced with String(x).replace(/\D/g,"")   (util.ts, mongo.ts)
- *   - country/language/timezone are inferred from those digits (util.ts CALLING_CODES)
+ * The constraints these have to satisfy, which consumers share:
+ *   - group chat ids look like /^[\d-]{10,31}@g\.us$/
+ *   - participants appear as "<digits>@s.whatsapp.net"
+ *   - ids are compared after String(x).replace(/\D/g,"")
+ *   - a country is inferred from those digits' calling-code prefix
  *
  * That last point is why LIDs must never leak through. A LID's digits are not a
  * phone number, so a leaked LID wouldn't crash anything — it would quietly make
- * gepetel infer the wrong language for a group. Silent wrongness is worse than a
- * throw, so `toWhapiUserId` is deliberately strict about what it will emit.
+ * a consumer infer the wrong country for a group. Silent wrongness is worse than a
+ * throw, so `toUserId` is deliberately strict about what it will emit.
  */
 
 export const S_WHATSAPP = "@s.whatsapp.net";
@@ -34,13 +34,13 @@ export function stripDevice(jid: string): string {
     return `${user}${jid.slice(at)}`;
 }
 
-/** Just the digits — the form gepetel reduces everything to anyway. */
+/** Just the digits — the form ids are compared in. */
 export function digitsOf(jid: string | undefined | null): string {
     return String(jid ?? "").split("@")[0].split(":")[0].replace(/\D/g, "");
 }
 
 /**
- * Normalise any Baileys JID into the chat id shape gepetel stores and matches on.
+ * Normalise any Baileys JID into the chat id shape this gateway emits and matches on.
  * Groups keep their @g.us form; users become <digits>@s.whatsapp.net.
  *
  * NOTE: this does not resolve LIDs — it cannot, being pure. Callers must resolve
@@ -48,7 +48,7 @@ export function digitsOf(jid: string | undefined | null): string {
  * here is passed through unchanged so it is visible in logs rather than silently
  * reshaped into something that looks like a phone number.
  */
-export function toWhapiChatId(jid: string | undefined | null): string {
+export function toChatId(jid: string | undefined | null): string {
     if (!jid) return "";
     const clean = stripDevice(String(jid));
     if (isGroupJid(clean)) return clean;
@@ -58,17 +58,17 @@ export function toWhapiChatId(jid: string | undefined | null): string {
 }
 
 /**
- * The `from` / participant field. whapi hands gepetel bare digits here, and
- * gepetel uses it as a People collection key and for phone-prefix inference.
+ * The `from` / participant field: bare digits, which is what consumers key
+ * contacts on and infer a country from.
  */
-export function toWhapiUserId(jid: string | undefined | null): string {
+export function toUserId(jid: string | undefined | null): string {
     return digitsOf(jid);
 }
 
 /**
- * Inbound direction: turn whatever gepetel puts in a `to` field into a real JID.
+ * Inbound direction: turn whatever a caller puts in a `to` field into a real JID.
  * Accepts "120363...@g.us", "4075...@s.whatsapp.net", "4075...@c.us", or bare
- * digits (gepetel passes CREATOR_PHONE and reminder phone numbers that way).
+ * digits, which is how most callers pass a phone number.
  */
 export function toWaJid(input: string | undefined | null): string {
     const raw = String(input ?? "").trim();

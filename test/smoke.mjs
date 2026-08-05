@@ -167,7 +167,7 @@ try {
 
     const created = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "gepetel", webhookUrl: "http://127.0.0.1:8792/whapi" }),
+        body: JSON.stringify({ id: "alpha-bot", webhookUrl: "http://127.0.0.1:8792/webhook" }),
     });
     const createdJson = await created.json();
     tokenA = createdJson?.number?.token || "";
@@ -179,7 +179,7 @@ try {
             method: "POST",
             body: JSON.stringify({
                 id: "second-bot",
-                webhookUrl: "http://127.0.0.1:8793/whapi",
+                webhookUrl: "http://127.0.0.1:8793/webhook",
                 sendRatePerMinute: 5,
             }),
         })
@@ -191,7 +191,7 @@ try {
 
     const badId = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "bad:id", webhookUrl: "http://127.0.0.1:8792/whapi" }),
+        body: JSON.stringify({ id: "bad:id", webhookUrl: "http://127.0.0.1:8792/webhook" }),
     });
     check(
         "an id that would break key namespacing is a 400",
@@ -201,7 +201,7 @@ try {
 
     const dupId = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "gepetel", webhookUrl: "http://127.0.0.1:8792/whapi" }),
+        body: JSON.stringify({ id: "alpha-bot", webhookUrl: "http://127.0.0.1:8792/webhook" }),
     });
     check("a duplicate id is refused", dupId.status === 400, `status=${dupId.status}`);
 
@@ -213,7 +213,7 @@ try {
 
     const badRate = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "third", webhookUrl: "http://x.test/whapi", sendRatePerMinute: "lots" }),
+        body: JSON.stringify({ id: "third", webhookUrl: "http://x.test/webhook", sendRatePerMinute: "lots" }),
     });
     check(
         "a non-numeric send rate is refused rather than silently disabling the limiter",
@@ -226,7 +226,7 @@ try {
     // The console's "is this working?" line. Nothing has arrived on a freshly
     // added number, so it must say so rather than inventing a timestamp.
 
-    const fresh = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "gepetel");
+    const fresh = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "alpha-bot");
     check(
         "a new number reports no messages received yet",
         fresh?.lastMessage === undefined && fresh?.messagesReceived === 0,
@@ -301,14 +301,14 @@ try {
     const noAuth = await fetch(`${base}/messages/text`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ to: "40700000000", body: "hi" }),
+        body: JSON.stringify({ to: "12025550111", body: "hi" }),
     });
     check("unauthenticated API call is rejected", noAuth.status === 401, `status=${noAuth.status}`);
 
     const badToken = await fetch(`${base}/messages/text`, {
         method: "POST",
         headers: authOf("not-a-real-token"),
-        body: JSON.stringify({ to: "40700000000", body: "hi" }),
+        body: JSON.stringify({ to: "12025550111", body: "hi" }),
     });
     check("an unknown token is rejected", badToken.status === 401, `status=${badToken.status}`);
 
@@ -326,15 +326,15 @@ try {
         const r = await fetch(`${base}/messages/text`, {
             method: "POST",
             headers: authOf(token),
-            body: JSON.stringify({ to: "40700000000", body: "hi" }),
+            body: JSON.stringify({ to: "12025550111", body: "hi" }),
         });
         return [r, await r.json()];
     };
 
     const [sendA, sendAJson] = await send(tokenA);
     check(
-        "token A routes to session 'gepetel'",
-        sendA.status === 502 && /session "gepetel" not connected/.test(sendAJson?.error?.message || ""),
+        "token A routes to session 'alpha-bot'",
+        sendA.status === 502 && /session "alpha-bot" not connected/.test(sendAJson?.error?.message || ""),
         sendAJson?.error?.message
     );
 
@@ -350,19 +350,19 @@ try {
         sendAJson?.error?.message !== sendBJson?.error?.message
     );
 
-    // --- whapi request validation -------------------------------------------
+    // --- per-verb request validation ------------------------------------------
 
     const badBody = await fetch(`${base}/messages/text`, {
         method: "POST",
         headers: authOf(tokenA),
-        body: JSON.stringify({ to: "40700000000" }),
+        body: JSON.stringify({ to: "12025550111" }),
     });
     check("missing body is a 400, not a 500", badBody.status === 400, `status=${badBody.status}`);
 
     const badPoll = await fetch(`${base}/messages/poll`, {
         method: "POST",
         headers: authOf(tokenA),
-        body: JSON.stringify({ to: "40700000000", poll: { name: "q", options: ["only-one"] } }),
+        body: JSON.stringify({ to: "12025550111", poll: { name: "q", options: ["only-one"] } }),
     });
     check("a one-option poll is a 400", badPoll.status === 400, `status=${badPoll.status}`);
 
@@ -410,7 +410,7 @@ try {
     await mc.connect();
     const db = mc.db("smoke");
 
-    const credA = await db.collection("auth_creds").findOne({ _id: "gepetel:creds" });
+    const credA = await db.collection("auth_creds").findOne({ _id: "alpha-bot:creds" });
     const credB = await db.collection("auth_creds").findOne({ _id: "second-bot:creds" });
     check("each session persists its own credentials", !!credA && !!credB);
     check(
@@ -421,7 +421,7 @@ try {
 
     const keysUnscoped = await db
         .collection("auth_keys")
-        .countDocuments({ _id: { $not: { $regex: /^(gepetel|second-bot):/ } } });
+        .countDocuments({ _id: { $not: { $regex: /^(alpha-bot|second-bot):/ } } });
     check("no auth key escapes its session namespace", keysUnscoped === 0, `unscoped=${keysUnscoped}`);
 
     const idx = await db.collection("message_keys").indexes();
@@ -467,12 +467,12 @@ try {
     const list = await (await mgmt("/numbers")).json();
     check(
         "numbers added at runtime survive a restart",
-        list.numbers.map((n) => n.id).sort().join(",") === "gepetel,second-bot",
+        list.numbers.map((n) => n.id).sort().join(",") === "alpha-bot,second-bot",
         list.numbers.map((n) => n.id).join(",")
     );
     check(
         "and their tokens still route after the restart",
-        list.numbers.find((n) => n.id === "gepetel")?.token === tokenA
+        list.numbers.find((n) => n.id === "alpha-bot")?.token === tokenA
     );
 
     // Deleting must take the credentials with it: a leftover auth document means
@@ -486,7 +486,7 @@ try {
     const db = mc.db("smoke");
     const leftoverCreds = await db.collection("auth_creds").countDocuments({ _id: /^second-bot:/ });
     const leftoverKeys = await db.collection("auth_keys").countDocuments({ _id: /^second-bot:/ });
-    const survivorCreds = await db.collection("auth_creds").countDocuments({ _id: /^gepetel:/ });
+    const survivorCreds = await db.collection("auth_creds").countDocuments({ _id: /^alpha-bot:/ });
     await mc.close();
 
     check(

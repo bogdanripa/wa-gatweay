@@ -48,7 +48,7 @@ export interface SessionDoc {
     updatedAt: Date;
 }
 
-/** id -> the full WAMessageKey, so whapi-style "act on this message id" calls work. */
+/** id -> the full WAMessageKey, so "act on this message id" calls work. */
 export interface MessageKeyDoc {
     /** `${sessionId}:${messageId}` — message ids are only unique within a session. */
     _id: string;

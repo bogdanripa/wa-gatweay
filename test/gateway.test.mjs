@@ -8,8 +8,8 @@ import {
     looksLikePhoneNumber,
     stripDevice,
     toWaJid,
-    toWhapiChatId,
-    toWhapiUserId,
+    toChatId,
+    toUserId,
 } from "../dist/jid.js";
 import { classify, unwrap } from "../dist/map.js";
 import {
@@ -20,90 +20,75 @@ import {
 } from "../dist/cloud.js";
 
 const GROUP = "120363012345678901@g.us";
-const USER = "40750271099@s.whatsapp.net";
+const USER = "12025550100@s.whatsapp.net";
 
 /**
  * A real LID seen in production. Its digits are not a phone number, but nothing
  * downstream can tell — which is the whole reason the resolution path exists.
  */
 const LID = "139556506575001@lid";
-const PN = "40750271099@s.whatsapp.net";
+const PN = "12025550100@s.whatsapp.net";
 
 /**
- * gepetel's own group-id guard, copied verbatim from its whapi.ts. Anything the
- * gateway emits as a chat_id for a group must satisfy it or getGroupInfo
- * short-circuits to an empty roster.
+ * The shape a group id has to keep. Consumers commonly guard on something like
+ * this before treating a chat as a group, so emitting anything else means the
+ * group silently reads as a DM.
  */
-const GEPETEL_GROUP_RE = /^[\d-]{10,31}@g\.us$/;
+const GROUP_ID_RE = /^[\d-]{10,31}@g\.us$/;
 
-/**
- * gepetel's webhook branching, transcribed from app.ts. Tests assert against
- * this rather than against my own payload shape, so the tests fail if I drift
- * from what gepetel actually reads.
- */
-function gepetelBranch(message) {
-    if (message.text && message.text.body) return { branch: "text", value: message.text.body };
-    if (message.gif && message.gif.preview) return { branch: "gif", value: message.gif.preview };
-    if (message.image && message.image.preview)
-        return { branch: "image", value: message.image.link || message.image.preview };
-    if ((message.voice && message.voice.link) || (message.audio && message.audio.link))
-        return { branch: "voice", value: (message.voice || message.audio).link };
-    if (message.link_preview) return { branch: "link_preview", value: message.link_preview.title };
-    return { branch: "ignored", value: null };
-}
 
 // ---------------------------------------------------------------------- jid
 
-test("group jids survive gepetel's group-id regex", () => {
-    const chatId = toWhapiChatId(GROUP);
+test("group jids keep the shape consumers guard on", () => {
+    const chatId = toChatId(GROUP);
     assert.equal(chatId, GROUP);
-    assert.ok(GEPETEL_GROUP_RE.test(chatId), `${chatId} must match gepetel's group regex`);
+    assert.ok(GROUP_ID_RE.test(chatId), `${chatId} must still read as a group id`);
 });
 
 test("legacy dashed group ids also match", () => {
     const legacy = "120363012345678-1234567890@g.us";
-    assert.ok(GEPETEL_GROUP_RE.test(toWhapiChatId(legacy)));
+    assert.ok(GROUP_ID_RE.test(toChatId(legacy)));
 });
 
 test("user jids normalise to <digits>@s.whatsapp.net", () => {
-    assert.equal(toWhapiChatId(USER), USER);
-    assert.equal(toWhapiChatId("40750271099"), USER);
+    assert.equal(toChatId(USER), USER);
+    assert.equal(toChatId("12025550100"), USER);
 });
 
 test("device suffixes are stripped (Baileys sends 4075...:12@s.whatsapp.net)", () => {
-    assert.equal(stripDevice("40750271099:12@s.whatsapp.net"), USER);
-    assert.equal(toWhapiChatId("40750271099:12@s.whatsapp.net"), USER);
-    assert.equal(toWhapiUserId("40750271099:12@s.whatsapp.net"), "40750271099");
+    assert.equal(stripDevice("12025550100:12@s.whatsapp.net"), USER);
+    assert.equal(toChatId("12025550100:12@s.whatsapp.net"), USER);
+    assert.equal(toUserId("12025550100:12@s.whatsapp.net"), "12025550100");
 });
 
-test("digitsOf matches gepetel's String(x).replace(/\\D/g,'') exactly", () => {
-    for (const input of [USER, "40750271099", "+40 750 271 099", GROUP]) {
+test("digitsOf matches String(x).replace(/\\D/g,'') exactly", () => {
+    for (const input of [USER, "12025550100", "+40 750 271 099", GROUP]) {
         assert.equal(digitsOf(input), String(input).replace(/\D/g, "").replace(/@.*/, ""));
     }
 });
 
-test("BOT_PHONE_DIGITS matching still works through the gateway", () => {
-    // gepetel: participantIds.some(id => BOT_PHONE_DIGITS.includes(String(id).replace(/\D/g,"")))
-    const BOT_PHONE_DIGITS = ["40750271099", "279697464266959"];
-    const emitted = toWhapiUserId("40750271099:3@s.whatsapp.net");
+test("a bot can still recognise its own number among participants", () => {
+    // The common pattern: participants.some(id => MY_DIGITS.includes(digitsOf(id)))
+    const BOT_PHONE_DIGITS = ["12025550100", "279697464266959"];
+    const emitted = toUserId("12025550100:3@s.whatsapp.net");
     assert.ok(BOT_PHONE_DIGITS.includes(String(emitted).replace(/\D/g, "")));
 });
 
-test("toWaJid accepts every shape gepetel sends as `to`", () => {
+test("toWaJid accepts every shape a caller sends as `to`", () => {
     assert.equal(toWaJid(GROUP), GROUP);
     assert.equal(toWaJid(USER), USER);
-    assert.equal(toWaJid("40750271099"), USER); // CREATOR_PHONE / reminder phone
-    assert.equal(toWaJid("40750271099@c.us"), USER);
+    assert.equal(toWaJid("12025550100"), USER); // CREATOR_PHONE / reminder phone
+    assert.equal(toWaJid("12025550100@c.us"), USER);
     assert.equal(toWaJid(""), "");
     assert.equal(toWaJid(undefined), "");
 });
 
 test("LIDs are passed through unchanged, never mangled into fake phone numbers", () => {
     const lid = "123456789012345@lid";
-    // Deliberate: a LID reaching toWhapiChatId is a bug upstream, and reshaping it
-    // into <digits>@s.whatsapp.net would hide that bug behind wrong language
-    // inference in gepetel.
-    assert.equal(toWhapiChatId(lid), lid);
+    // Deliberate: a LID reaching toChatId is a bug upstream, and reshaping
+    // it into <digits>@s.whatsapp.net would hide that bug behind wrong country
+    // inference downstream.
+    assert.equal(toChatId(lid), lid);
     assert.equal(looksLikePhoneNumber(lid), false);
     assert.equal(looksLikePhoneNumber(USER), true);
     assert.equal(looksLikePhoneNumber(GROUP), false);
@@ -149,8 +134,8 @@ test("image carries its caption", () => {
 
 test("gifPlayback video is a gif; a normal video is skipped", () => {
     assert.equal(classify({ videoMessage: { gifPlayback: true } }).kind, "gif");
-    // gepetel has no video branch — forwarding one would hit its `console.error`
-    // + `continue` path on every video anyone posts.
+    // There is no video payload shape, so forwarding one would only make a
+    // consumer log and discard it — on every video anyone posts.
     assert.equal(classify({ videoMessage: { gifPlayback: false } }).kind, "skip");
 });
 
@@ -189,7 +174,7 @@ test("digits of an unresolved LID are indistinguishable from a phone number", ()
 });
 
 test("a non-LID jid is left alone — there is nothing to resolve", () => {
-    assert.equal(preferPhoneNumber(PN, "40711111111@s.whatsapp.net"), null);
+    assert.equal(preferPhoneNumber(PN, "12025550142@s.whatsapp.net"), null);
 });
 
 test("a LID whose alt is also a LID resolves to nothing", () => {
@@ -213,11 +198,12 @@ test("an alt too long to be E.164 is refused", () => {
     assert.equal(preferPhoneNumber(LID, "1234567890123456@s.whatsapp.net"), null);
 });
 
-test("a resolved sender reaches gepetel as real phone digits", () => {
+test("a resolved sender comes out as real phone digits", () => {
     const resolved = preferPhoneNumber(LID, PN) ?? LID;
-    assert.equal(toWhapiUserId(resolved), "40750271099");
-    // And the country prefix gepetel keys off is now the right one.
-    assert.ok(toWhapiUserId(resolved).startsWith("40"));
+    assert.equal(toUserId(resolved), "12025550100");
+    // And the calling-code prefix a consumer keys off is now the right one:
+    // "1" (US), not the "139…" of the LID it came from.
+    assert.ok(toUserId(resolved).startsWith("1202"));
 });
 
 // ---------------------------------------------------------------------------
@@ -228,8 +214,8 @@ test("a resolved sender reaches gepetel as real phone digits", () => {
 // keeps working after a base-URL change, and only Meta's shapes can prove that.
 
 const CLOUD_META = {
-    displayPhoneNumber: "15550783881",
-    phoneNumberId: "106540352242922",
+    displayPhoneNumber: "12025550199",
+    phoneNumberId: "100000000000000",
     businessAccountId: "102290129340398",
 };
 
@@ -325,15 +311,15 @@ test("an inbound DM matches Meta's webhook nesting exactly", () => {
     assert.equal(change.field, "messages");
     assert.equal(change.value.messaging_product, "whatsapp");
     assert.deepEqual(change.value.metadata, {
-        display_phone_number: "15550783881",
-        phone_number_id: "106540352242922",
+        display_phone_number: "12025550199",
+        phone_number_id: "100000000000000",
     });
     assert.deepEqual(change.value.contacts, [
-        { profile: { name: "Sheena Nelson" }, wa_id: "40750271099" },
+        { profile: { name: "Sheena Nelson" }, wa_id: "12025550100" },
     ]);
     const msg = change.value.messages[0];
     assert.deepEqual(msg, {
-        from: "40750271099",
+        from: "12025550100",
         id: "wamid.ABC",
         // Meta sends the timestamp as a STRING; clients parse it as one.
         timestamp: "1749416383",
@@ -351,7 +337,7 @@ test("a group message carries group_id, with the participant in from", () => {
     );
     const msg = event.entry[0].changes[0].value.messages[0];
     assert.equal(msg.group_id, GROUP);
-    assert.equal(msg.from, "40750271099");
+    assert.equal(msg.from, "12025550100");
 });
 
 test("a DM has no group_id at all, rather than a null one", () => {
@@ -402,5 +388,5 @@ test("group participant events use Meta's group_participants_update field", () =
     const group = event.entry[0].changes[0].value.groups[0];
     assert.equal(group.group_id, GROUP);
     assert.equal(group.subject, "Team");
-    assert.deepEqual(group.participants, [{ wa_id: "40750271099", name: "Bogdan" }]);
+    assert.deepEqual(group.participants, [{ wa_id: "12025550100", name: "Bogdan" }]);
 });
