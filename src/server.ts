@@ -1,6 +1,6 @@
 import express from "express";
 import { API_PREFIX, config } from "./config.js";
-import { logger } from "./log.js";
+import { captureConsole, logger } from "./log.js";
 import { connectStores } from "./store.js";
 import { MediaStore } from "./media.js";
 import { SessionManager } from "./sessions.js";
@@ -8,6 +8,10 @@ import { makeApiRouter, makeGatewayRouter, makeManagementRouter } from "./routes
 import { ConnectionWatcher, TelegramNotifier } from "./alerts.js";
 
 async function main() {
+    // Before anything opens a socket: libsignal starts dumping session state to
+    // console.info the moment sessions are in play.
+    captureConsole();
+
     const stores = await connectStores();
 
     const media = new MediaStore(stores);
