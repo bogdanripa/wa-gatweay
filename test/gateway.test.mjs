@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
     digitsOf,
     preferPhoneNumber,
+    rewriteMentions,
     isGroupJid,
     looksLikePhoneNumber,
     stripDevice,
@@ -11,7 +12,7 @@ import {
     toChatId,
     toUserId,
 } from "../dist/jid.js";
-import { classify, unwrap } from "../dist/map.js";
+import { classify, mentionedJidsOf, unwrap } from "../dist/map.js";
 import {
     buildCloudGroupEvent,
     buildCloudMessageEvent,
@@ -487,4 +488,73 @@ test("the unsupported-type error names poll as available", () => {
     } catch (e) {
         assert.match(e.details, /poll/);
     }
+});
+
+// ---------------------------------------------------------------------- mentions
+//
+// A LID leaking into the message *body*. WhatsApp writes only the JID's user
+// part into the text, so a mention in a LID-addressed group reads
+// "@81656102801535" — digits that look exactly like a phone number downstream.
+
+const MENTION_LID = "81656102801535@lid";
+
+test("mentions come from contextInfo, not from the text", () => {
+    assert.deepEqual(
+        mentionedJidsOf({
+            extendedTextMessage: {
+                text: "@81656102801535 pe la cat plecati?",
+                contextInfo: { mentionedJid: [MENTION_LID] },
+            },
+        }),
+        [MENTION_LID]
+    );
+});
+
+test("mentions are found on media messages too, not just text", () => {
+    assert.deepEqual(
+        mentionedJidsOf({ imageMessage: { caption: "@1 hi", contextInfo: { mentionedJid: [MENTION_LID] } } }),
+        [MENTION_LID]
+    );
+});
+
+test("a message with no mentions yields none", () => {
+    assert.deepEqual(mentionedJidsOf({ conversation: "no mentions here" }), []);
+    assert.deepEqual(mentionedJidsOf(null), []);
+});
+
+test("a mentioned LID is rewritten to the phone number", () => {
+    const mapping = new Map([["81656102801535", "12025550100"]]);
+    assert.equal(
+        rewriteMentions("@81656102801535 pe la cat plecati?", mapping),
+        "@12025550100 pe la cat plecati?"
+    );
+});
+
+test("several mentions in one message are all rewritten", () => {
+    const mapping = new Map([["81656102801535", "12025550100"], ["99900011122233", "12025550142"]]);
+    assert.equal(
+        rewriteMentions("@81656102801535 and @99900011122233 both", mapping),
+        "@12025550100 and @12025550142 both"
+    );
+});
+
+test("a number someone typed by hand is never touched", () => {
+    // The reason the mapping comes from mentionedJid and not a regex: this text
+    // contains a bare @-number that WhatsApp did not report as a mention.
+    const mapping = new Map([["81656102801535", "12025550100"]]);
+    assert.equal(
+        rewriteMentions("call @40712345678 or @81656102801535", mapping),
+        "call @40712345678 or @12025550100"
+    );
+});
+
+test("an unresolvable mention is left visible rather than reshaped", () => {
+    // Same rule as toChatId: a LID nobody could resolve stays a LID, so the bug
+    // is visible instead of masquerading as a phone number.
+    assert.equal(rewriteMentions("@81656102801535 hi", new Map()), "@81656102801535 hi");
+});
+
+test("rewriting copes with no text at all", () => {
+    assert.equal(rewriteMentions(undefined, new Map([["1", "2"]])), undefined);
+    assert.equal(rewriteMentions("", new Map([["1", "2"]])), "");
 });

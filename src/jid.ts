@@ -107,6 +107,28 @@ export function preferPhoneNumber(
     return looksLikePhoneNumber(a) ? a : null;
 }
 
+/**
+ * Replace `@<digits>` mention tokens using an explicit mapping.
+ *
+ * Only tokens whose digits are a key in the mapping are touched, so this cannot
+ * rewrite a number someone typed by hand — the caller builds the mapping from
+ * WhatsApp's own `mentionedJid` list, never from the text.
+ *
+ * An unmapped mention is left exactly as it was. That keeps an unresolved LID
+ * visible instead of quietly reshaping it into something that reads like a
+ * phone number, which is the same rule `toChatId` follows.
+ */
+export function rewriteMentions(
+    text: string | undefined,
+    mapping: Map<string, string>
+): string | undefined {
+    if (!text || mapping.size === 0) return text;
+    return text.replace(/@(\d{5,20})/g, (whole, digits: string) => {
+        const to = mapping.get(digits);
+        return to ? `@${to}` : whole;
+    });
+}
+
 /** Does this look like a phone number rather than a LID or group id? */
 export function looksLikePhoneNumber(jid: string | undefined | null): boolean {
     if (!jid) return false;

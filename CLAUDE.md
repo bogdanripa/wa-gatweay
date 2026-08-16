@@ -35,6 +35,8 @@ Resolve in this order, and don't drop a step:
 
 Resolutions from step 1 are written back with `storeLIDPNMappings`, so later events that arrive without an alt (poll votes, rosters) hit the cache.
 
+LIDs leak through the message **body** too, not just id fields: WhatsApp writes only a JID's user part into the text, so a mention in a LID-addressed group reads `@81656102801535`. `resolveMentions` rewrites those, building its mapping from `contextInfo.mentionedJid` — never by pattern-matching the text, which would also rewrite a number somebody typed by hand. An unresolvable mention stays a LID, for the same reason `toChatId` doesn't reshape one.
+
 **History sync is an allow-list, not off.** `shouldSyncHistoryMessage: () => false` looks harmless — the bots never read history — but it disables all seven of Baileys' sync types, and two of them carry the LID↔phone mappings and the contact/chat names. Baileys says so on connect ("DANGER: … PREVENTS BAILEYS FROM ACCESSING INITIAL LID MAPPINGS"), and the symptom is item 3 above silently returning null forever. Allow `INITIAL_BOOTSTRAP`, `PUSH_NAME` and `NON_BLOCKING_DATA`; keep refusing `FULL`/`RECENT`/`ON_DEMAND`, which are the actual message backfill. Nothing from a sync can reach a bot anyway — `onMessages` only forwards `type === "notify"`.
 
 Turning sync on means a burst of `contacts.update` on every connect, which is why `onContacts` dedupes against what it has already emitted. Without that, a bot gets told the same name dozens of times per reconnect.

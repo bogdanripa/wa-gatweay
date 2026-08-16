@@ -14,7 +14,7 @@ import { scopedId, type Stores } from "./store.js";
 import { useMongoAuthState } from "./authState.js";
 import { MediaStore } from "./media.js";
 import { WebhookSender } from "./webhook.js";
-import { classify, unwrap } from "./map.js";
+import { classify, mentionedJidsOf, unwrap } from "./map.js";
 import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
@@ -30,6 +30,7 @@ import {
     isGroupJid,
     isLidJid,
     preferPhoneNumber,
+    rewriteMentions,
     stripDevice,
     toWaJid,
     toChatId,
@@ -564,6 +565,8 @@ export class Session {
             ? await this.media.save(msg, cls.mediaKind, this.sock!, this.id)
             : undefined;
 
+        await this.resolveMentions(cls, msg, isGroup ? msg.key.remoteJid : undefined);
+
         this.noteInbound({
             at: Session.sentAt(msg),
             from: toUserId(senderJid),
@@ -575,6 +578,57 @@ export class Session {
         const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined };
         const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
         if (event) await this.webhook.send(event);
+    }
+
+    /**
+     * Turn `@<lid>` mentions in the body into `@<phone number>`.
+     *
+     * WhatsApp puts mentions in `contextInfo.mentionedJid` and writes only the
+     * JID's user part into the text, so in a LID-addressed group the body reads
+     * `@81656102801535`. Those digits are not a phone number, but nothing
+     * downstream can tell — the same leak `from` is resolved to prevent, through
+     * a different field.
+     *
+     * The mapping is built from the JIDs WhatsApp listed, never by pattern
+     * matching the text, so a number somebody typed by hand is untouchable.
+     * Anything that cannot be resolved is left as it was and logged, because a
+     * visible LID beats a plausible-looking wrong number.
+     */
+    private async resolveMentions(
+        cls: { text?: string; caption?: string },
+        msg: WAMessage,
+        groupJid?: string
+    ) {
+        const mentions = mentionedJidsOf(msg.message).filter(isLidJid);
+        if (!mentions.length) return;
+
+        const mapping = new Map<string, string>();
+        for (const jid of mentions) {
+            const resolved = await this.resolveMention(jid, groupJid);
+            if (resolved) mapping.set(digitsOf(jid), digitsOf(resolved));
+        }
+        if (!mapping.size) return;
+
+        cls.text = rewriteMentions(cls.text, mapping);
+        cls.caption = rewriteMentions(cls.caption, mapping);
+    }
+
+    /** Mapping store first, then the group roster we already hold. */
+    private async resolveMention(jid: string, groupJid?: string): Promise<string | undefined> {
+        const viaStore = await this.resolveToPn(jid);
+        if (viaStore !== jid) return viaStore;
+
+        // The roster carries `phoneNumber` beside a participant's LID, and for a
+        // group we have usually just fetched it for the chat name — so this is a
+        // cache read, not another rate-limited query.
+        const roster = groupJid ? this.groupCache.get(groupJid)?.meta.participants : undefined;
+        const hit = roster?.find(
+            (p) => digitsOf(p.id) === digitsOf(jid) || digitsOf((p as any).lid) === digitsOf(jid)
+        );
+        if (hit?.phoneNumber) return hit.phoneNumber;
+
+        this.log.warn({ jid }, "unresolved LID in a mention — left as-is in the message body");
+        return undefined;
     }
 
     /**

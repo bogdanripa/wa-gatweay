@@ -44,6 +44,30 @@ export function unwrap(
     return m;
 }
 
+/**
+ * The JIDs WhatsApp says were mentioned in this message.
+ *
+ * Every message type can carry a `contextInfo`, and mentions live there rather
+ * than in the body — the body only holds `@<user-part>` text. In a LID-addressed
+ * group that user part is a LID, so the raw text reads `@81656102801535`, which
+ * is 14 digits that look exactly like a phone number to anything downstream.
+ *
+ * Taking the list from here rather than pattern-matching the text is the whole
+ * point: a regex over free text would also rewrite a number somebody typed.
+ */
+export function mentionedJidsOf(message: proto.IMessage | null | undefined): string[] {
+    const m = unwrap(message);
+    if (!m) return [];
+    const ctx =
+        m.extendedTextMessage?.contextInfo ||
+        m.imageMessage?.contextInfo ||
+        m.videoMessage?.contextInfo ||
+        m.audioMessage?.contextInfo ||
+        m.documentMessage?.contextInfo ||
+        m.stickerMessage?.contextInfo;
+    return (ctx?.mentionedJid || []).filter((j): j is string => !!j);
+}
+
 export function classify(message: proto.IMessage | null | undefined): Classification {
     const m = unwrap(message);
     if (!m) return { kind: "skip" };
