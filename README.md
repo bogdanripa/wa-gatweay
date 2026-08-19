@@ -4,7 +4,7 @@ A self-hosted WhatsApp gateway built on [Baileys](https://github.com/whiskeysock
 
 It owns the WhatsApp sessions and speaks two protocols:
 
-- **Outbound (bot → gateway):** WhatsApp Cloud API request bodies and responses, plus a set of older per-verb send routes.
+- **Outbound (bot → gateway):** WhatsApp Cloud API request bodies and responses.
 - **Inbound (gateway → bot):** WhatsApp Cloud API webhook payloads — the `entry/changes/value` envelope, with `group_id` on group messages.
 
 ```
@@ -118,15 +118,12 @@ Note the `/api`. Every path *below* the base URL is what a client hardcodes, and
 
 Paths are relative to the base URL, which is `https://<host>/api`:
 
-| Endpoint | Used by the bot for |
+| Endpoint | |
 |---|---|
-| `GET /groups/:id` | authoritative roster + group subject |
-| `POST /messages/text` | every reply, gossip and reminder |
-| `POST /messages/image` | generated images |
-| `POST /messages/poll` | native polls |
-| `PUT /messages/:id` | mark as read (blue ticks) |
-| `PUT /messages/:id/reaction` | emoji reactions |
-| `PUT /presences/:to` | typing indicator |
+| `POST /<PHONE_NUMBER_ID>/messages` | every send — text, media, location, reaction, poll, and the `status: "read"` update |
+| `GET /groups/:id` | a group's roster and subject |
+
+One send endpoint, as Meta has it. The per-verb routes this started with (`/messages/text`, `/messages/image`, `/messages/poll`, `PUT /messages/:id`, `PUT /messages/:id/reaction`, `PUT /presences/:to`) are gone — each was a second way to say what the Cloud shape already says, and two surfaces mean two to keep honest.
 
 Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, link preview), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies).
 

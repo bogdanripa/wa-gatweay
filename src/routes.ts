@@ -17,14 +17,17 @@ import {
 import { toWaJid, toUserId } from "./jid.js";
 
 /**
- * The REST surface.
+ * The REST surface: WhatsApp Cloud API shaped, and only that.
  *
- * Two families live here, deliberately:
+ * `POST /<PHONE_NUMBER_ID>/messages` covers every kind of send, so a client
+ * written against Meta's API works after a base-URL change and nothing else. An
+ * older set of per-verb routes (`/messages/text`, `/messages/image`, …) used to
+ * sit alongside it and is gone: every one was a second way to say something the
+ * Cloud shape already says, which is two surfaces to keep honest for no gain.
  *
- *   - `POST /<PHONE_NUMBER_ID>/messages` — WhatsApp Cloud API shaped, so a client
- *     written against Meta's API works after a base-URL change and nothing else.
- *   - the older per-verb routes below, kept because they cost nothing and some
- *     clients are written against that style.
+ * `GET /groups/:id` is the exception, and stays. Meta has no equivalent — its
+ * Groups API only addresses groups the business itself created — so removing it
+ * would drop a capability rather than a duplicate.
  *
  * Everything is relative to the base URL a client is configured with. That base
  * carries an `/api` prefix, because the platform proxies only `/api/*` to the
@@ -35,15 +38,6 @@ import { toWaJid, toUserId } from "./jid.js";
  * Multi-number routing is by bearer token: a bot sends its own token and reaches
  * its own number, so adding a second bot on a second number needs no code change
  * on either side.
- *
- * The per-verb routes:
- *   GET  /groups/:id            -> { participants, participants_count, name }
- *   POST /messages/text         { to, body }
- *   POST /messages/image        { to, media, caption }
- *   POST /messages/poll         { to, poll: { name, options, allow_multiple_answers } }
- *   PUT  /messages/:id          { status: "read" }
- *   PUT  /messages/:id/reaction { emoji }
- *   PUT  /presences/:to         { presence, delay }
  */
 
 /** The session resolved from the bearer token, attached by the auth middleware. */
@@ -91,11 +85,8 @@ export function makeApiRouter(manager: SessionManager): Router {
     // Scoped to the real API prefixes rather than mounted at the root: a typo'd
     // path should 404, not 401. A 401 on an unknown route sends you hunting for a
     // credentials problem that isn't there.
-    // `/:phoneNumberId/messages` can't be prefix-scoped like the others, so the
-    // Cloud route authenticates through the same middleware by matching any
-    // first segment followed by /messages.
     router.use(
-        ["/groups", "/messages", "/presences", "/:phoneNumberId/messages"],
+        ["/groups", "/:phoneNumberId/messages"],
         (req: ApiRequest, res: Response, next) => {
             const token = bearerOf(req);
             const session = token ? manager.byTokenOrNull(token) : null;
@@ -135,99 +126,6 @@ export function makeApiRouter(manager: SessionManager): Router {
         }
     });
 
-    // --- messages -----------------------------------------------------------
-
-    router.post("/messages/text", async (req: ApiRequest, res) => {
-        try {
-            const { to, body } = req.body || {};
-            if (!to || typeof body !== "string") {
-                refused(req, "to and body are required");
-                res.status(400).json({ error: { message: "to and body are required" } });
-                return;
-            }
-            const sent = await sessionOf(req).sendText(String(to), body);
-            res.json({ sent: true, message: { id: sent.id } });
-        } catch (e) {
-            fail(res, e, 502);
-        }
-    });
-
-    router.post("/messages/image", async (req: ApiRequest, res) => {
-        try {
-            const { to, media, caption } = req.body || {};
-            if (!to || !media) {
-                refused(req, "to and media are required");
-                res.status(400).json({ error: { message: "to and media are required" } });
-                return;
-            }
-            const sent = await sessionOf(req).sendImage(String(to), String(media), caption);
-            res.json({ sent: true, message: { id: sent.id } });
-        } catch (e) {
-            fail(res, e, 502);
-        }
-    });
-
-    router.post("/messages/poll", async (req: ApiRequest, res) => {
-        try {
-            const { to, poll } = req.body || {};
-            const name = poll?.name;
-            const options: string[] = (poll?.options || [])
-                .map((o: any) => String(o ?? "").trim())
-                .filter(Boolean);
-            if (!to || !name || options.length < 2) {
-                refused(req, "to, poll.name and >=2 poll.options are required");
-                res.status(400).json({
-                    error: { message: "to, poll.name and >=2 poll.options are required" },
-                });
-                return;
-            }
-            const sent = await sessionOf(req).sendPoll(
-                String(to),
-                String(name),
-                options,
-                // This route's boolean, mapped onto the count WhatsApp actually
-                // takes: everything, or exactly one.
-                poll?.allow_multiple_answers ? options.length : 1
-            );
-            // Both `message.id` and a bare `id` are returned: clients differ.
-            res.json({ sent: true, message: { id: sent.id }, id: sent.id });
-        } catch (e) {
-            // Failing loudly lets a client fall back to a plain text poll rather
-            // than silently losing it.
-            fail(res, e, 502);
-        }
-    });
-
-    // Registered before the bare /messages/:id route so the more specific path wins.
-    router.put("/messages/:id/reaction", async (req: ApiRequest, res) => {
-        try {
-            const emoji = req.body?.emoji;
-            if (typeof emoji !== "string") {
-                refused(req, "emoji is required");
-                res.status(400).json({ error: { message: "emoji is required" } });
-                return;
-            }
-            await sessionOf(req).react(req.params.id, emoji);
-            res.json({ sent: true });
-        } catch (e) {
-            fail(res, e, 502);
-        }
-    });
-
-    router.put("/messages/:id", async (req: ApiRequest, res) => {
-        try {
-            if (req.body?.status !== "read") {
-                refused(req, "only { status: 'read' } is supported");
-                res.status(400).json({ error: { message: "only { status: 'read' } is supported" } });
-                return;
-            }
-            await sessionOf(req).markRead(req.params.id);
-            res.json({ sent: true });
-        } catch (e) {
-            fail(res, e, 502);
-        }
-    });
-
     // --- WhatsApp Cloud API compatible ---------------------------------------
     //
     // `POST /<PHONE_NUMBER_ID>/messages`, Meta's shape. The path segment is
@@ -264,19 +162,6 @@ export function makeApiRouter(manager: SessionManager): Router {
             }
             logger.error({ e }, "cloud send failed");
             res.status(502).json(buildCloudError(e instanceof Error ? e : new Error(String(e))));
-        }
-    });
-
-    // --- presence -----------------------------------------------------------
-
-    router.put("/presences/:to", async (req: ApiRequest, res) => {
-        try {
-            const presence = req.body?.presence || "typing";
-            await sessionOf(req).sendPresence(req.params.to, presence);
-            res.json({ sent: true });
-        } catch (e) {
-            // A failed typing indicator is cosmetic; the result is ignorable.
-            fail(res, e, 502);
         }
     });
 

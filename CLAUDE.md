@@ -8,13 +8,15 @@ A WhatsApp gateway on Baileys, hosting N numbers in one process, running on a Ra
 
 The compatibility contract is the whole point. Every consumer is a separate codebase you cannot see from here, so a changed payload shape or endpoint breaks something you have no way to test.
 
-"Endpoint" means the path *below the base URL*. Everything is served under `/api` because Pironman routes only `/api/*` to a container and answers every other path from the static bundle — which is the management console. A client's base URL carries the prefix; `/messages/text` and the rest are untouched below it, and they must stay that way.
+"Endpoint" means the path *below the base URL*. Everything is served under `/api` because Pironman routes only `/api/*` to a container and answers every other path from the static bundle — which is the management console. A client's base URL carries the prefix; `/<PHONE_NUMBER_ID>/messages` and the rest are untouched below it, and they must stay that way.
 
 ## The contract with consumers
 
 Consumers are not in this repo, and there is no way to test against them from here. Two surfaces are load-bearing:
 
-**Outbound (bot → gateway).** `POST /<PHONE_NUMBER_ID>/messages` in WhatsApp Cloud API shape, plus the older per-verb routes (`/messages/text` and friends). Both are permanent. The path segment on the Cloud route is cosmetic — the bearer token identifies the number — which is what makes migrating a base-URL change.
+**Outbound (bot → gateway).** `POST /<PHONE_NUMBER_ID>/messages` in WhatsApp Cloud API shape, and nothing else. The older per-verb routes (`/messages/text` and friends) are gone: each was a second way to say what the Cloud shape already says. The path segment is cosmetic — the bearer token identifies the number — which is what makes migrating a base-URL change.
+
+`GET /groups/:id` survives that removal because Meta has no equivalent, so dropping it would lose a capability rather than a duplicate.
 
 **Inbound (gateway → bot).** WhatsApp Cloud API webhooks only: the `entry[].changes[].value` envelope, `metadata`, `contacts[].profile.name`, and `messages[]` with `group_id` set on group messages and the participant in `from`. `cloud.ts` owns every byte of this.
 
@@ -63,7 +65,7 @@ It is fail-*closed*, not lax: no key means the management router is replaced who
 
 **Connection alerts must stay quiet to stay useful.** `alerts.ts` deliberately does *not* fire on every disconnect: WhatsApp drops sockets constantly and Baileys reconnects within seconds, so a naive alert-on-close trains the operator to ignore it within an hour. The grace period, the immediate path for `logged-out`/`conflict`, and the "never connected is not an incident" rule are the whole point — don't simplify them away. A failed alert must never take down the thing it is watching, which is why every send is caught.
 
-**Webhooks are WhatsApp Cloud API shaped, and only that.** `cloud.ts` builds every outbound event; the older payload builders are gone, along with the per-number dialect setting. Sending still accepts both surfaces — they're different routes, so there's no conflict — but a bot consuming webhooks reads Meta's envelope or nothing.
+**Everything is WhatsApp Cloud API shaped, both directions.** `cloud.ts` builds every outbound event and parses every send; the older payload builders, the per-number dialect setting and the per-verb send routes are all gone. One shape, one place to keep honest.
 
 `cloud.ts` is pure for the same reason `map.ts` is, and its tests assert against shapes lifted from Meta's own documentation — not against this code. That is the only thing that can prove the migration promise.
 
@@ -95,7 +97,7 @@ Meta's group support is narrower than it looks — its Groups API only addresses
 | `sessions.ts` | SessionManager — token→session routing, runtime add/remove |
 | `media.ts` | download, decrypt, serve, sweep |
 | `webhook.ts` | serialised at-least-once delivery, one queue per session |
-| `routes.ts` | Cloud API + per-verb REST, health/media, management API |
+| `routes.ts` | Cloud API send, groups, health/media, management API |
 | `alerts.ts` | Telegram connection alerts, deliberately debounced |
 | `frontend/` | the console — plain HTML/CSS/JS, no build step |
 | `dev/serve.mjs` | local stand-in for Pironman's static + `/api` proxy split |

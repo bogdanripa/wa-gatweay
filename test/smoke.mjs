@@ -55,6 +55,15 @@ const mgmt = (path, options = {}) =>
 
 const authOf = (token) => ({ "content-type": "application/json", authorization: `Bearer ${token}` });
 
+/** A minimal valid Cloud API send body, for the routing checks. */
+const cloudText = () =>
+    JSON.stringify({
+        messaging_product: "whatsapp",
+        to: "12025550111",
+        type: "text",
+        text: { body: "hi" },
+    });
+
 /** Boot with an env override and keep it running; resolves once /api/health answers. */
 function bootWith(envOverride, port) {
     const p = spawn(process.execPath, ["dist/server.js"], {
@@ -298,17 +307,17 @@ try {
 
     // --- token routing ------------------------------------------------------
 
-    const noAuth = await fetch(`${base}/messages/text`, {
+    const noAuth = await fetch(`${base}/1/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ to: "12025550111", body: "hi" }),
+        body: cloudText(),
     });
     check("unauthenticated API call is rejected", noAuth.status === 401, `status=${noAuth.status}`);
 
-    const badToken = await fetch(`${base}/messages/text`, {
+    const badToken = await fetch(`${base}/1/messages`, {
         method: "POST",
         headers: authOf("not-a-real-token"),
-        body: JSON.stringify({ to: "12025550111", body: "hi" }),
+        body: cloudText(),
     });
     check("an unknown token is rejected", badToken.status === 401, `status=${badToken.status}`);
 
@@ -323,10 +332,10 @@ try {
     // The "not connected" error names the session, which is how we prove the
     // token selected the right one without needing a paired account.
     const send = async (token) => {
-        const r = await fetch(`${base}/messages/text`, {
+        const r = await fetch(`${base}/1/messages`, {
             method: "POST",
             headers: authOf(token),
-            body: JSON.stringify({ to: "12025550111", body: "hi" }),
+            body: cloudText(),
         });
         return [r, await r.json()];
     };
@@ -350,21 +359,33 @@ try {
         sendAJson?.error?.message !== sendBJson?.error?.message
     );
 
-    // --- per-verb request validation ------------------------------------------
+    // --- request validation ---------------------------------------------------
 
-    const badBody = await fetch(`${base}/messages/text`, {
+    const badBody = await fetch(`${base}/1/messages`, {
         method: "POST",
         headers: authOf(tokenA),
-        body: JSON.stringify({ to: "12025550111" }),
+        body: JSON.stringify({ messaging_product: "whatsapp", to: "12025550111", type: "text" }),
     });
-    check("missing body is a 400, not a 500", badBody.status === 400, `status=${badBody.status}`);
+    check("a missing text body is a 400, not a 500", badBody.status === 400, `status=${badBody.status}`);
 
-    const badPoll = await fetch(`${base}/messages/poll`, {
+    const badPoll = await fetch(`${base}/1/messages`, {
         method: "POST",
         headers: authOf(tokenA),
-        body: JSON.stringify({ to: "12025550111", poll: { name: "q", options: ["only-one"] } }),
+        body: JSON.stringify({
+            messaging_product: "whatsapp", to: "12025550111", type: "poll",
+            poll: { name: "q", options: ["only-one"] },
+        }),
     });
     check("a one-option poll is a 400", badPoll.status === 400, `status=${badPoll.status}`);
+
+    // The removed per-verb routes must be gone, not quietly still answering.
+    for (const [method, path] of [
+        ["POST", "/messages/text"], ["POST", "/messages/image"], ["POST", "/messages/poll"],
+        ["PUT", "/messages/abc"], ["PUT", "/messages/abc/reaction"], ["PUT", "/presences/12025550111"],
+    ]) {
+        const r = await fetch(`${base}${path}`, { method, headers: authOf(tokenA), body: "{}" });
+        check(`${method} ${path} is gone`, r.status === 404, `status=${r.status}`);
+    }
 
     // --- editing ------------------------------------------------------------
 
