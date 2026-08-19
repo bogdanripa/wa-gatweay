@@ -290,6 +290,31 @@
   "type": "text", "text": { "body": "Hello everyone" }
 } ]</code></pre>
 
+  <h3>Replies</h3>
+  <p>
+    A message that replies to another carries a <code>context</code> object, in Meta's
+    shape. It is present <strong>only</strong> on replies — a message that quotes nothing
+    has no <code>context</code> key at all, so existing handling is unaffected.
+  </p>
+  <pre><code>"messages": [ {
+  "from": "12025550100",
+  "id": "3EB0…",
+  "timestamp": "1754300000",
+  "context": {
+    "id":   "3EB0AAAA…",      // the message being replied to
+    "from": "12025550199"     // who sent that message
+  },
+  "type": "text",
+  "text": { "body": "yes, agreed" }
+} ]</code></pre>
+  <p class="muted">
+    On every message type, not just text — a reply to a photo or a voice note carries it
+    too. <code>context.from</code> is the quoted sender as bare digits, resolved from a
+    LID like any other id. When the quoted message is one <em>you</em> sent, that is an
+    ordinary reply and <code>context.from</code> is your own number, which is how a bot
+    can tell someone replied to it.
+  </p>
+
   <h3>Message types</h3>
   <table>
     <thead><tr><th>type</th><th>payload</th></tr></thead>

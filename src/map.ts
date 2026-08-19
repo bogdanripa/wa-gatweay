@@ -56,16 +56,54 @@ export function unwrap(
  * point: a regex over free text would also rewrite a number somebody typed.
  */
 export function mentionedJidsOf(message: proto.IMessage | null | undefined): string[] {
+    return (contextInfoOf(message)?.mentionedJid || []).filter((j): j is string => !!j);
+}
+
+/**
+ * The `contextInfo` node, wherever it lives.
+ *
+ * Every message type carries its own, so this is a lookup rather than a field —
+ * and getting it from all of them is what makes replies work for a photo or a
+ * voice note and not only for text.
+ */
+function contextInfoOf(message: proto.IMessage | null | undefined): proto.IContextInfo | undefined {
     const m = unwrap(message);
-    if (!m) return [];
-    const ctx =
+    if (!m) return undefined;
+    return (
         m.extendedTextMessage?.contextInfo ||
         m.imageMessage?.contextInfo ||
         m.videoMessage?.contextInfo ||
         m.audioMessage?.contextInfo ||
         m.documentMessage?.contextInfo ||
-        m.stickerMessage?.contextInfo;
-    return (ctx?.mentionedJid || []).filter((j): j is string => !!j);
+        m.stickerMessage?.contextInfo ||
+        undefined
+    );
+}
+
+/** The message this one replies to, if it replies to anything. */
+export interface QuotedContext {
+    /** Id of the quoted message. */
+    id: string;
+    /** Who sent the quoted message — a JID, still possibly a LID. */
+    participant?: string;
+}
+
+/**
+ * Is this message a reply, and to what?
+ *
+ * Keyed on `stanzaId`, not on `contextInfo` existing: contextInfo is also
+ * present for a message that merely has mentions or a forwarding score, so
+ * treating its presence as "this is a reply" would put a context on messages
+ * that reply to nothing.
+ *
+ * A message quoting one the gateway itself sent is an ordinary reply and
+ * reported like any other — the bot's own number is a perfectly good `from`,
+ * and suppressing it would hide exactly the case a bot most wants to see.
+ */
+export function quotedContextOf(message: proto.IMessage | null | undefined): QuotedContext | undefined {
+    const ctx = contextInfoOf(message);
+    if (!ctx?.stanzaId) return undefined;
+    return { id: ctx.stanzaId, participant: ctx.participant || undefined };
 }
 
 export function classify(message: proto.IMessage | null | undefined): Classification {
@@ -121,6 +159,11 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
 }
 
 export interface ResolvedIds {
+    /**
+     * Set only when the message is a reply. Additive: everything else in the
+     * payload is unchanged whether this is present or not.
+     */
+    context?: { id: string; from?: string };
     /** Already LID-resolved chat JID. */
     chatJid: string;
     /** Already LID-resolved sender JID (for groups: the participant). */

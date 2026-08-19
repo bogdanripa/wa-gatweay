@@ -12,7 +12,7 @@ import {
     toChatId,
     toUserId,
 } from "../dist/jid.js";
-import { classify, mentionedJidsOf, unwrap } from "../dist/map.js";
+import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "../dist/map.js";
 import {
     buildCloudGroupEvent,
     buildCloudMessageEvent,
@@ -557,4 +557,89 @@ test("an unresolvable mention is left visible rather than reshaped", () => {
 test("rewriting copes with no text at all", () => {
     assert.equal(rewriteMentions(undefined, new Map([["1", "2"]])), undefined);
     assert.equal(rewriteMentions("", new Map([["1", "2"]])), "");
+});
+
+// ----------------------------------------------------------------- reply context
+//
+// Meta's own shape for a reply: `context: { from, id }` on the message, present
+// only when the message actually quotes another. Strictly additive — a message
+// that replies to nothing must look exactly as it did before.
+
+const QUOTED_ID = "3EB0AAAABBBBCCCC";
+const BOT_NUMBER = "12025550199@s.whatsapp.net";
+
+const withContext = (message, ids = {}) =>
+    buildCloudMessageEvent(
+        { key: { id: "wamid.R", remoteJid: GROUP, participant: USER }, messageTimestamp: 1 },
+        classify(message),
+        { chatJid: GROUP, senderJid: USER, ...ids },
+        CLOUD_META
+    ).entry[0].changes[0].value.messages[0];
+
+test("a reply to a text message carries context", () => {
+    const q = quotedContextOf({
+        extendedTextMessage: {
+            text: "da, ok",
+            contextInfo: { stanzaId: QUOTED_ID, participant: USER },
+        },
+    });
+    assert.deepEqual(q, { id: QUOTED_ID, participant: USER });
+});
+
+test("a reply to a photo carries context — not text-only", () => {
+    const q = quotedContextOf({
+        imageMessage: { caption: "asta", contextInfo: { stanzaId: QUOTED_ID, participant: USER } },
+    });
+    assert.equal(q.id, QUOTED_ID);
+});
+
+test("a reply to a voice note carries context", () => {
+    const q = quotedContextOf({
+        audioMessage: { ptt: true, contextInfo: { stanzaId: QUOTED_ID, participant: USER } },
+    });
+    assert.equal(q.id, QUOTED_ID);
+});
+
+test("a reply to a message the gateway itself sent is reported like any other", () => {
+    // The bot's own number is a perfectly good `from`; suppressing it would hide
+    // exactly the case a bot most wants to notice.
+    const q = quotedContextOf({
+        extendedTextMessage: { text: "ok", contextInfo: { stanzaId: QUOTED_ID, participant: BOT_NUMBER } },
+    });
+    assert.deepEqual(q, { id: QUOTED_ID, participant: BOT_NUMBER });
+});
+
+test("a message that replies to nothing has no context at all", () => {
+    assert.equal(quotedContextOf({ conversation: "plain" }), undefined);
+    // contextInfo exists for mentions too — its presence alone is not a reply.
+    assert.equal(
+        quotedContextOf({
+            extendedTextMessage: { text: "@1 hi", contextInfo: { mentionedJid: ["1@lid"] } },
+        }),
+        undefined
+    );
+});
+
+test("context reaches the webhook payload, in Meta's shape", () => {
+    const msg = withContext(
+        { extendedTextMessage: { text: "da", contextInfo: { stanzaId: QUOTED_ID, participant: USER } } },
+        { context: { id: QUOTED_ID, from: "12025550100" } }
+    );
+    assert.deepEqual(msg.context, { id: QUOTED_ID, from: "12025550100" });
+});
+
+test("context rides on media messages too", () => {
+    const msg = withContext(
+        { imageMessage: { caption: "x", contextInfo: { stanzaId: QUOTED_ID, participant: USER } } },
+        { context: { id: QUOTED_ID, from: "12025550100" } }
+    );
+    assert.equal(msg.type, "image");
+    assert.deepEqual(msg.context, { id: QUOTED_ID, from: "12025550100" });
+});
+
+test("the payload is unchanged when the message is not a reply", () => {
+    // The additive guarantee, asserted rather than assumed.
+    const msg = withContext({ conversation: "plain" });
+    assert.ok(!("context" in msg));
+    assert.deepEqual(Object.keys(msg).sort(), ["from", "group_id", "id", "text", "timestamp", "type"]);
 });

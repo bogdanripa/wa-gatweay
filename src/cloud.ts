@@ -339,6 +339,9 @@ export function buildCloudMessageEvent(
         timestamp: String(Number(waMessage.messageTimestamp) || Math.floor(Date.now() / 1000)),
     };
     if (isGroup) message.group_id = chatId;
+    // Meta's own shape for a reply, and set only when there is one. Added before
+    // the type switch so it applies to every kind of message, not just text.
+    if (ids.context) message.context = ids.context;
 
     switch (cls.kind) {
         case "text":

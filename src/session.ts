@@ -14,7 +14,7 @@ import { scopedId, type Stores } from "./store.js";
 import { useMongoAuthState } from "./authState.js";
 import { MediaStore } from "./media.js";
 import { WebhookSender } from "./webhook.js";
-import { classify, mentionedJidsOf, unwrap } from "./map.js";
+import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "./map.js";
 import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
@@ -567,6 +567,26 @@ export class Session {
 
         await this.resolveMentions(cls, msg, isGroup ? msg.key.remoteJid : undefined);
 
+        // Only set when the message actually replies to something, so the payload
+        // is byte-identical to before for everything else.
+        const quoted = quotedContextOf(msg.message);
+        let context: { id: string; from?: string } | undefined;
+        if (quoted) {
+            const from = quoted.participant
+                ? await this.resolveParticipant(
+                      quoted.participant,
+                      isGroup ? msg.key.remoteJid : undefined,
+                      "the sender of a quoted message"
+                  )
+                : undefined;
+            context = {
+                id: quoted.id,
+                // Falls back to the raw participant so an unresolvable LID is
+                // still reported rather than dropped — visible, as everywhere else.
+                from: toUserId(from ?? quoted.participant ?? "") || undefined,
+            };
+        }
+
         this.noteInbound({
             at: Session.sentAt(msg),
             from: toUserId(senderJid),
@@ -575,7 +595,7 @@ export class Session {
             isGroup,
         });
 
-        const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined };
+        const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined, context };
         const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
         if (event) await this.webhook.send(event);
     }
@@ -604,7 +624,7 @@ export class Session {
 
         const mapping = new Map<string, string>();
         for (const jid of mentions) {
-            const resolved = await this.resolveMention(jid, groupJid);
+            const resolved = await this.resolveParticipant(jid, groupJid, "a mention");
             if (resolved) mapping.set(digitsOf(jid), digitsOf(resolved));
         }
         if (!mapping.size) return;
@@ -613,8 +633,18 @@ export class Session {
         cls.caption = rewriteMentions(cls.caption, mapping);
     }
 
-    /** Mapping store first, then the group roster we already hold. */
-    private async resolveMention(jid: string, groupJid?: string): Promise<string | undefined> {
+    /**
+     * Mapping store first, then the group roster we already hold.
+     *
+     * `where` only shapes the warning: knowing a LID went unresolved is useful,
+     * knowing whether it was a mention or a quoted sender is what makes it
+     * actionable.
+     */
+    private async resolveParticipant(
+        jid: string,
+        groupJid?: string,
+        where = "an id"
+    ): Promise<string | undefined> {
         const viaStore = await this.resolveToPn(jid);
         if (viaStore !== jid) return viaStore;
 
@@ -627,7 +657,7 @@ export class Session {
         );
         if (hit?.phoneNumber) return hit.phoneNumber;
 
-        this.log.warn({ jid }, "unresolved LID in a mention — left as-is in the message body");
+        this.log.warn({ jid, where }, "unresolved LID — passed through rather than reshaped");
         return undefined;
     }
 
