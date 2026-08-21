@@ -1114,6 +1114,16 @@ export class Session {
                         remoteJid: k.remoteJid,
                         fromMe: !!k.fromMe,
                         participant: k.participant || undefined,
+                        // Only our own messages, and only their content: a retry
+                        // receipt asks us to re-send something WE sent, so an
+                        // inbound message's body would be stored for nothing.
+                        ...(k.fromMe && msg.message
+                            ? {
+                                  message: Buffer.from(
+                                      proto.Message.encode(msg.message).finish()
+                                  ).toString("base64"),
+                              }
+                            : {}),
                         createdAt: new Date(),
                     },
                 },
@@ -1138,10 +1148,28 @@ export class Session {
     /** Baileys calls this when it needs a message body back (poll votes, retries). */
     private async lookupMessage(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
         if (!key.id) return undefined;
+
+        // Polls first: their creation message outlives the 7-day key TTL because
+        // vote tallies accrue for months.
         const poll = await this.stores.polls
             .findOne({ _id: scopedId(this.id, key.id) })
             .catch(() => null);
         if (poll) return proto.Message.decode(Buffer.from(poll.message, "base64"));
+
+        // Then anything we sent. This is what answers a retry receipt, and
+        // returning undefined here is why a recipient can sit on "Waiting for
+        // this message" indefinitely — nothing ever re-sends it.
+        const sent = await this.stores.messageKeys
+            .findOne({ _id: scopedId(this.id, key.id) })
+            .catch(() => null);
+        if (sent?.message) {
+            return proto.Message.decode(Buffer.from(sent.message, "base64"));
+        }
+
+        this.log.warn(
+            { id: key.id },
+            "a retry asked for a message we no longer hold — the recipient will keep waiting"
+        );
         return undefined;
     }
 

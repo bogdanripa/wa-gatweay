@@ -57,6 +57,16 @@ export interface MessageKeyDoc {
     remoteJid: string;
     fromMe: boolean;
     participant?: string;
+    /**
+     * base64 of the encoded proto.Message, for messages this gateway sent.
+     *
+     * Needed to answer a retry receipt. When a recipient cannot decrypt, it asks
+     * the sender to send again, and Baileys calls `getMessage` for the original
+     * content to re-encrypt. Without it the recipient sits on "Waiting for this
+     * message" forever. Baileys' own retry cache is in memory, so it is empty
+     * after any redeploy — which is exactly when this matters.
+     */
+    message?: string;
     createdAt: Date;
 }
 
