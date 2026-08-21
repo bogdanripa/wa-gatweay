@@ -102,9 +102,17 @@ jobs:
             code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
             case "$code" in
               2*) echo "up (HTTP $code)"; exit 0 ;;
-              # 404 is retried, not failed: during rollover the request can
-              # still reach the outgoing container.
-              000|404|502|503|504) echo "waiting ($code)"; sleep 6 ;;
+              # Retried, not failed. During rollover the request can still
+              # reach the outgoing container (404), or arrive in the gap where
+              # this app has stopped and its replacement has not yet started
+              # (500) — that gap exists because the app runs one container at a
+              # time on purpose: two of them would hold the same WhatsApp
+              # credentials and fight over the device slot.
+              #
+              # NOTE: this line is the one deliberate deviation from the
+              # workflow apps_deploy_workflow generates. Regenerating that file
+              # drops the 500 and every deploy goes red again while succeeding.
+              000|404|500|502|503|504) echo "waiting ($code)"; sleep 6 ;;
               *) echo "$url answered HTTP $code — the health path must "
                  echo "return 2xx without authentication"; exit 1 ;;
             esac
