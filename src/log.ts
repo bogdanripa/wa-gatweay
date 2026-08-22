@@ -2,7 +2,19 @@ import { format } from "node:util";
 import pino from "pino";
 import { config } from "./config.js";
 
-export const logger = pino({ level: config.logLevel });
+/**
+ * `e` is serialised as an error, not as a plain object.
+ *
+ * Without this, `logger.error({ e }, "...")` writes `"e":{}` for any ordinary
+ * Error, because `message` and `stack` are non-enumerable. Boom errors happened
+ * to survive — they carry enumerable properties — which made the gap look like
+ * it wasn't there. It cost a debugging round: a poll vote failed twice and both
+ * lines said only `"e":{}`.
+ */
+export const logger = pino({
+    level: config.logLevel,
+    serializers: { e: pino.stdSerializers.err, err: pino.stdSerializers.err },
+});
 
 /**
  * A much quieter child logger handed to Baileys itself — it logs a great deal at

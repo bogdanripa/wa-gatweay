@@ -1,7 +1,6 @@
 import makeWASocket, {
     decryptPollVote,
     DisconnectReason,
-    getKeyAuthor,
     jidNormalizedUser,
     makeCacheableSignalKeyStore,
     proto,
@@ -746,14 +745,52 @@ export class Session {
                 return true;
             }
 
-            const meId = jidNormalizedUser(this.sock?.user?.id || "");
-            const voterJid = getKeyAuthor(msg.key, meId);
-            const decrypted = decryptPollVote(update.vote, {
-                pollEncKey,
-                pollCreatorJid: getKeyAuthor(update.pollCreationMessageKey!, meId),
-                pollMsgId: pollId,
-                voterJid,
-            });
+            // The creator and voter JIDs are mixed into the AES-GCM signature, so
+            // the wrong *form* of an id fails authentication rather than
+            // producing wrong output — it throws, and every vote is lost.
+            //
+            // `getKeyAuthor` prefers `participantAlt`, the phone-number form. In a
+            // LID-addressed group the voter encrypted with the LID, so that
+            // preference is exactly backwards here. Rather than guess the
+            // addressing mode, try the forms we hold: LID first, since that is
+            // where WhatsApp is heading and where this was observed failing.
+            const meLid = this.sock?.user?.lid ? jidNormalizedUser(this.sock.user.lid) : undefined;
+            const mePn = jidNormalizedUser(this.sock?.user?.id || "");
+            const key = msg.key as typeof msg.key & { participantAlt?: string };
+            const voterLid = key.participant ? jidNormalizedUser(key.participant) : undefined;
+            const voterPn = key.participantAlt ? jidNormalizedUser(key.participantAlt) : undefined;
+
+            const attempts: Array<{ creator: string; voter: string }> = [];
+            for (const creator of [meLid, mePn]) {
+                for (const voter of [voterLid, voterPn]) {
+                    if (creator && voter) attempts.push({ creator, voter });
+                }
+            }
+
+            let decrypted: ReturnType<typeof decryptPollVote> | undefined;
+            let voterJid = voterLid || voterPn || "";
+            for (const attempt of attempts) {
+                try {
+                    decrypted = decryptPollVote(update.vote, {
+                        pollEncKey,
+                        pollCreatorJid: attempt.creator,
+                        pollMsgId: pollId,
+                        voterJid: attempt.voter,
+                    });
+                    voterJid = attempt.voter;
+                    this.log.debug({ pollId, ...attempt }, "poll vote decrypted");
+                    break;
+                } catch {
+                    // Wrong form for this chat; try the next.
+                }
+            }
+            if (!decrypted) {
+                this.log.error(
+                    { pollId, tried: attempts.length },
+                    "could not decrypt a poll vote with any known id form"
+                );
+                return true;
+            }
 
             // A vote names its choices as SHA-256 of the option text. Compared as
             // hex rather than via toString(), which differs between Buffer and
