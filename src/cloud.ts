@@ -414,32 +414,67 @@ export function buildCloudContactsEvent(
 }
 
 /**
- * Poll tallies. Meta has no poll type at all, so this is ours — but it is
- * shaped like everything else so a client parses it the same way, and it is
- * carried on its own `field` so an existing switch ignores it safely.
+ * A poll vote, as an inbound message.
+ *
+ * Meta's Cloud API cannot do polls in either direction, so there is no official
+ * shape to copy. This follows how Meta models `button_reply` and `list_reply`:
+ * the response is an ordinary inbound message of type `interactive`, whose
+ * `context` points at the message being responded to. That context is the join
+ * key a tally needs, and it is the same `context` object a reply carries.
+ *
+ * Three deliberate choices:
+ *
+ *   - `selected_options` is this voter's COMPLETE current selection, not a
+ *     delta. WhatsApp polls are revisable, so a change or a clear is just
+ *     another delivery and no consumer has to reconstruct state. Clearing a
+ *     vote sends an empty array.
+ *   - `results` and `total` carry the full tally every time. A vote-only
+ *     payload would force every consumer to accumulate counts itself and get it
+ *     subtly wrong; sending the whole picture makes a missed or out-of-order
+ *     delivery self-correcting.
+ *   - option `id` is the option's index as a string, stable for the life of the
+ *     poll, so a consumer can key on it rather than on the title text.
  */
-export function buildCloudPollEvent(
-    messageId: string,
-    chatJid: string,
-    pollName: string,
-    votes: Array<{ name: string; voters: string[] }>,
+export function buildCloudPollVoteEvent(
+    vote: {
+        /** Id of this vote event — not the poll's. */
+        id: string;
+        /** Voter, bare digits. */
+        from: string;
+        voterName?: string;
+        timestamp: number;
+        /** The poll message being voted on. */
+        pollMessageId: string;
+        /** Who sent the poll — this gateway's own number. */
+        pollFrom: string;
+        groupJid?: string;
+        selected: Array<{ id: string; title: string }>;
+        results: Array<{ id: string; title: string; count: number; voters: string[] }>;
+    },
     meta: CloudMetadata
 ): Record<string, any> {
-    const results = votes.map((v) => ({
-        name: v.name,
-        count: v.voters.length,
-        voters: v.voters.map(toUserId),
-    }));
-    const chatId = toChatId(chatJid);
-    return envelope(meta, "message_polls", {
-        polls: [
-            {
-                id: messageId,
-                ...(isGroupJid(chatId) ? { group_id: chatId } : { recipient_id: toUserId(chatId) }),
-                name: pollName,
-                total: results.reduce((s, r) => s + r.count, 0),
-                results,
+    const message: Record<string, any> = {
+        from: vote.from,
+        id: vote.id,
+        timestamp: String(vote.timestamp),
+        type: "interactive",
+        // The critical field: without it a vote cannot be matched to its poll
+        // and the whole delivery is useless.
+        context: { from: vote.pollFrom, id: vote.pollMessageId },
+        interactive: {
+            type: "poll_response",
+            poll_response: {
+                selected_options: vote.selected,
+                results: vote.results,
+                total: vote.results.reduce((sum, r) => sum + r.count, 0),
             },
-        ],
-    });
+        },
+    };
+    if (vote.groupJid) message.group_id = toChatId(vote.groupJid);
+
+    const value: Record<string, any> = { messages: [message] };
+    if (vote.voterName) {
+        value.contacts = [{ profile: { name: vote.voterName }, wa_id: vote.from }];
+    }
+    return envelope(meta, "messages", value);
 }

@@ -137,8 +137,9 @@
     Meta's conventions exactly — a top-level object named after the <code>type</code>,
     snake_case fields — so it reads like the rest of the API, and
     <code>selectable_count</code> is WhatsApp's own wire field
-    (<code>selectableOptionsCount</code>) rather than an invention. Results come back on
-    the <a href="#poll-updates"><code>message_polls</code></a> webhook field.
+    (<code>selectableOptionsCount</code>) rather than an invention. Votes come back as
+    <a href="#webhook">inbound <code>poll_response</code> messages</a>, each carrying the
+    full running tally.
   </div>
   <pre><code><span class="m">POST</span> /&lt;PHONE_NUMBER_ID&gt;/messages
 { "messaging_product": "whatsapp",
@@ -347,17 +348,58 @@
   "value": { …, "contacts": [ { "profile": { "name": "Alex Doe" }, "wa_id": "12025550100" } ] } }</code></pre>
   <p class="muted">Only sent when a name actually changes, not on every WhatsApp re-announcement.</p>
 
-  <h3>Poll results</h3>
-  <p>
-    Meta has no poll type, so this one is ours — but it is shaped like everything else and
-    carried on its own field, so an existing switch ignores it safely.
+  <h3>Poll votes</h3>
+  <div class="note">
+    <strong>An extension — Meta has no polls in either direction.</strong> The Cloud API
+    can neither send nor receive them, so there is no official shape. This follows how
+    Meta models <code>button_reply</code> and <code>list_reply</code>: the response is an
+    ordinary inbound message of type <code>interactive</code> whose <code>context</code>
+    points at what it responds to — the same <code>context</code> object a reply carries.
+  </div>
+  <pre><code>"messages": [ {
+  "from": "12025550100",              // who voted
+  "id": "&lt;id of this vote event&gt;",
+  "timestamp": "1755870000",
+  "type": "interactive",
+  "context": {
+    "from": "12025550199",            // who sent the poll — your number
+    "id": "&lt;id of the POLL message&gt;"  // ← join on this
+  },
+  "interactive": {
+    "type": "poll_response",
+    "poll_response": {
+      "selected_options": [ { "id": "0", "title": "Pizza" } ],
+      "results": [
+        { "id": "0", "title": "Pizza",   "count": 3, "voters": ["12025550100", "12025550142"] },
+        { "id": "1", "title": "Sushi",   "count": 1, "voters": ["12025550177"] },
+        { "id": "2", "title": "Neither", "count": 0, "voters": [] }
+      ],
+      "total": 4
+    }
+  }
+} ]</code></pre>
+
+  <table>
+    <thead><tr><th>field</th><th></th></tr></thead>
+    <tbody>
+      <tr><td><code>context.id</code></td><td>The id of the poll message you sent — the
+        same id returned in <code>messages[0].id</code> when you posted it. This is what
+        joins a vote to its poll.</td></tr>
+      <tr><td><code>selected_options</code></td><td>This voter's <strong>complete current
+        choice</strong>, not a delta. Several entries for a multi-select poll; an empty
+        array when they clear their vote.</td></tr>
+      <tr><td><code>results</code></td><td>The full tally for every option, including ones
+        nobody picked. <code>id</code> is the option's index, stable for the life of the
+        poll, so key on it rather than the title.</td></tr>
+      <tr><td><code>total</code></td><td>Sum of all counts.</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">
+    A delivery arrives on <strong>every</strong> change — a new vote, a changed vote, a
+    cleared one. Because each carries the whole tally rather than an increment, a missed
+    or out-of-order delivery corrects itself on the next one, and nothing downstream has
+    to accumulate counts of its own.
   </p>
-  <pre><code>{ "field": "message_polls",
-  "value": { …, "polls": [ {
-    "id": "3EB0…", "group_id": "120363000000000000@g.us",
-    "name": "Lunch?", "total": 3,
-    "results": [ { "name": "Pizza", "count": 2, "voters": ["12025550100","12025550142"] } ]
-  } ] } }</code></pre>
 
   <div class="note">
     <strong>Delivery is ordered and at-least-once.</strong> Events for a number are

@@ -1,12 +1,15 @@
 import makeWASocket, {
+    decryptPollVote,
     DisconnectReason,
-    getAggregateVotesInPollMessage,
+    getKeyAuthor,
+    jidNormalizedUser,
     makeCacheableSignalKeyStore,
     proto,
     type GroupMetadata,
     type WAMessage,
     type WASocket,
 } from "baileys";
+import { createHash } from "node:crypto";
 import { Boom } from "@hapi/boom";
 import { config, type SessionConfig } from "./config.js";
 import { logger, baileysLogger } from "./log.js";
@@ -19,7 +22,7 @@ import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
     buildCloudMessageEvent,
-    buildCloudPollEvent,
+    buildCloudPollVoteEvent,
     CloudRequestError,
     type CloudMetadata,
     type CloudSendKind,
@@ -254,9 +257,6 @@ export class Session {
         });
         this.sock.ev.on("messages.upsert", (u) => {
             if (current()) void this.onMessages(u);
-        });
-        this.sock.ev.on("messages.update", (u) => {
-            if (current()) void this.onMessageUpdates(u);
         });
         this.sock.ev.on("groups.upsert", (g) => {
             if (current()) void this.onGroups(g);
@@ -503,6 +503,10 @@ export class Session {
     private async handleMessage(msg: WAMessage) {
         if (!msg.key?.remoteJid) return;
         if (msg.key.remoteJid === "status@broadcast") return;
+
+        // Before the fromMe drop on purpose: our own vote changes the tally too,
+        // and a vote is not an echo of a message we sent.
+        if (await this.handlePollVote(msg)) return;
         // The bots filter `from_me` themselves, but sending our own messages back
         // would double every interaction log. Drop them here.
         if (msg.key.fromMe) return;
@@ -662,6 +666,127 @@ export class Session {
     }
 
     /**
+     * A poll vote, which arrives as an ordinary message carrying a
+     * `pollUpdateMessage`. Returns true when the message was one.
+     *
+     * Baileys used to decrypt these and re-emit them on `messages.update` with a
+     * `pollUpdates` array. In v7 that code is commented out and marked "TODO:
+     * Remove entirely", so nothing emits it any more — which is why every vote
+     * silently vanished: we were listening for an event the library had stopped
+     * producing. The decryption is done here instead.
+     */
+    private async handlePollVote(msg: WAMessage): Promise<boolean> {
+        const update = unwrap(msg.message)?.pollUpdateMessage;
+        const pollId = update?.pollCreationMessageKey?.id;
+        if (!update?.vote || !pollId) return false;
+
+        try {
+            const stored = await this.stores.polls.findOne({ _id: scopedId(this.id, pollId) });
+            if (!stored) {
+                // A poll someone else created, or one older than the 90-day TTL.
+                this.log.debug({ pollId }, "vote for a poll we do not hold");
+                return true;
+            }
+
+            const creation = proto.Message.decode(Buffer.from(stored.message, "base64"));
+            const pollEncKey = creation.messageContextInfo?.messageSecret;
+            if (!pollEncKey) {
+                this.log.warn({ pollId }, "stored poll has no message secret — cannot decrypt votes");
+                return true;
+            }
+
+            const meId = jidNormalizedUser(this.sock?.user?.id || "");
+            const voterJid = getKeyAuthor(msg.key, meId);
+            const decrypted = decryptPollVote(update.vote, {
+                pollEncKey,
+                pollCreatorJid: getKeyAuthor(update.pollCreationMessageKey!, meId),
+                pollMsgId: pollId,
+                voterJid,
+            });
+
+            // A vote names its choices as SHA-256 of the option text. Compared as
+            // hex rather than via toString(), which differs between Buffer and
+            // Uint8Array and would silently never match.
+            const chosen = (decrypted.selectedOptions || []).map((o) =>
+                Buffer.from(o).toString("hex")
+            );
+
+            // Replace this voter's previous selection; an empty one removes them,
+            // which is what makes a cleared vote lower the counts.
+            const votes = (stored.votes || []).filter((v) => v.voter !== voterJid);
+            if (chosen.length) {
+                votes.push({
+                    voter: voterJid,
+                    options: chosen,
+                    at: Number(update.senderTimestampMs) || Date.now(),
+                });
+            }
+            await this.stores.polls.updateOne({ _id: stored._id }, { $set: { votes } });
+
+            await this.emitPollVote(msg, stored, votes, voterJid, chosen);
+        } catch (e) {
+            this.log.error({ e, pollId }, "failed to handle a poll vote");
+        }
+        return true;
+    }
+
+    /** Build the full tally and deliver it. */
+    private async emitPollVote(
+        msg: WAMessage,
+        stored: { messageId: string; remoteJid: string; options: string[] },
+        votes: Array<{ voter: string; options: string[] }>,
+        voterJid: string,
+        chosen: string[]
+    ) {
+        const hashOf = (name: string) =>
+            createHash("sha256").update(Buffer.from(name)).digest("hex");
+
+        // Every option, including ones nobody picked: a consumer showing a tally
+        // needs the zeroes as much as the counts.
+        const results = await Promise.all(
+            stored.options.map(async (title, index) => {
+                const hash = hashOf(title);
+                const voters = votes.filter((v) => v.options.includes(hash)).map((v) => v.voter);
+                const resolved = await Promise.all(
+                    voters.map(async (v) =>
+                        toUserId((await this.resolveParticipant(v, isGroupJid(stored.remoteJid) ? stored.remoteJid : undefined, "a poll voter")) ?? v)
+                    )
+                );
+                return { id: String(index), title, count: resolved.length, voters: resolved };
+            })
+        );
+
+        const selected = stored.options
+            .map((title, index) => ({ id: String(index), title, hash: hashOf(title) }))
+            .filter((o) => chosen.includes(o.hash))
+            .map(({ id, title }) => ({ id, title }));
+
+        const voterPn =
+            (await this.resolveParticipant(
+                voterJid,
+                isGroupJid(stored.remoteJid) ? stored.remoteJid : undefined,
+                "a poll voter"
+            )) ?? voterJid;
+
+        await this.webhook.send(
+            buildCloudPollVoteEvent(
+                {
+                    id: msg.key.id || "",
+                    from: toUserId(voterPn),
+                    voterName: msg.pushName || undefined,
+                    timestamp: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
+                    pollMessageId: stored.messageId,
+                    pollFrom: digitsOf(this.me?.id),
+                    groupJid: isGroupJid(stored.remoteJid) ? stored.remoteJid : undefined,
+                    selected,
+                    results,
+                },
+                this.cloudMeta()
+            )
+        );
+    }
+
+    /**
      * Record that a message arrived, for the console's "is this actually
      * working?" line.
      *
@@ -702,47 +827,6 @@ export class Session {
         void this.stores.sessions
             .updateOne({ _id: this.id }, { $set: { lastMessage: this.lastMessage } })
             .catch((e) => this.log.debug({ e }, "could not persist last-message marker"));
-    }
-
-    private async onMessageUpdates(
-        updates: Array<{ key: proto.IMessageKey; update: Partial<WAMessage> }>
-    ) {
-        for (const u of updates) {
-            try {
-                const pollUpdates = (u.update as any)?.pollUpdates;
-                if (!pollUpdates?.length || !u.key?.id) continue;
-
-                const stored = await this.stores.polls.findOne({ _id: scopedId(this.id, u.key.id) });
-                if (!stored) continue; // not a poll this session created
-
-                const creation = proto.Message.decode(Buffer.from(stored.message, "base64"));
-                const votes = getAggregateVotesInPollMessage(
-                    { message: creation, pollUpdates },
-                    this.sock?.user?.id
-                );
-
-                // Voter jids come back as LIDs in newer groups; resolve before the
-                // bot tries to match them against its phone-keyed People records.
-                const resolved = await Promise.all(
-                    votes.map(async (v) => ({
-                        name: v.name,
-                        voters: await Promise.all(v.voters.map((x) => this.resolveToPn(x))),
-                    }))
-                );
-
-                await this.webhook.send(
-                    buildCloudPollEvent(
-                        u.key.id,
-                        stored.remoteJid,
-                        stored.name,
-                        resolved,
-                        this.cloudMeta()
-                    )
-                );
-            } catch (e) {
-                this.log.error({ e, id: u.key?.id }, "poll update handling failed");
-            }
-        }
     }
 
     private async onGroups(groups: GroupMetadata[]) {

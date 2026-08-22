@@ -16,6 +16,7 @@ import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "../dist/map.
 import {
     buildCloudGroupEvent,
     buildCloudMessageEvent,
+    buildCloudPollVoteEvent,
     buildCloudSendResponse,
     parseCloudSendRequest,
 } from "../dist/cloud.js";
@@ -642,4 +643,110 @@ test("the payload is unchanged when the message is not a reply", () => {
     const msg = withContext({ conversation: "plain" });
     assert.ok(!("context" in msg));
     assert.deepEqual(Object.keys(msg).sort(), ["from", "group_id", "id", "text", "timestamp", "type"]);
+});
+
+// ------------------------------------------------------------------ poll votes
+//
+// Meta's Cloud API cannot do polls in either direction, so there is no official
+// shape. This follows how Meta models button_reply/list_reply: the response is
+// an inbound `interactive` message whose `context` points at what it responds
+// to — which is exactly the join key a tally needs.
+
+const POLL_MSG_ID = "3EB0POLL0001";
+const BOT_DIGITS = "12025550199";
+
+const voteEvent = (over = {}) =>
+    buildCloudPollVoteEvent(
+        {
+            id: "3EB0VOTE0001",
+            from: "12025550100",
+            voterName: "Ana",
+            timestamp: 1755870000,
+            pollMessageId: POLL_MSG_ID,
+            pollFrom: BOT_DIGITS,
+            groupJid: GROUP,
+            selected: [{ id: "0", title: "Pizza" }],
+            results: [
+                { id: "0", title: "Pizza", count: 1, voters: ["12025550100"] },
+                { id: "1", title: "Sushi", count: 0, voters: [] },
+            ],
+            ...over,
+        },
+        CLOUD_META
+    ).entry[0].changes[0].value;
+
+test("a vote is an interactive message of type poll_response", () => {
+    const msg = voteEvent().messages[0];
+    assert.equal(msg.type, "interactive");
+    assert.equal(msg.interactive.type, "poll_response");
+});
+
+test("context.id is the POLL's message id, not the vote's", () => {
+    // The single easiest thing to get wrong, and the field a tally joins on.
+    const msg = voteEvent().messages[0];
+    assert.equal(msg.context.id, POLL_MSG_ID);
+    assert.notEqual(msg.context.id, msg.id);
+    assert.equal(msg.context.from, BOT_DIGITS);
+});
+
+test("the voter is in `from`, with their profile name in contacts", () => {
+    const value = voteEvent();
+    assert.equal(value.messages[0].from, "12025550100");
+    assert.deepEqual(value.contacts, [{ profile: { name: "Ana" }, wa_id: "12025550100" }]);
+});
+
+test("selected_options is the full current choice, and total sums the results", () => {
+    const r = voteEvent().messages[0].interactive.poll_response;
+    assert.deepEqual(r.selected_options, [{ id: "0", title: "Pizza" }]);
+    assert.equal(r.total, 1);
+});
+
+test("a multi-select vote lists every chosen option", () => {
+    const r = voteEvent({
+        selected: [{ id: "0", title: "Pizza" }, { id: "1", title: "Sushi" }],
+        results: [
+            { id: "0", title: "Pizza", count: 1, voters: ["12025550100"] },
+            { id: "1", title: "Sushi", count: 1, voters: ["12025550100"] },
+        ],
+    }).messages[0].interactive.poll_response;
+    assert.equal(r.selected_options.length, 2);
+    assert.equal(r.total, 2);
+});
+
+test("clearing a vote sends an empty selection and the counts drop", () => {
+    const r = voteEvent({
+        selected: [],
+        results: [
+            { id: "0", title: "Pizza", count: 0, voters: [] },
+            { id: "1", title: "Sushi", count: 0, voters: [] },
+        ],
+    }).messages[0].interactive.poll_response;
+    assert.deepEqual(r.selected_options, []);
+    assert.equal(r.total, 0);
+});
+
+test("results carry every option, including ones nobody picked", () => {
+    // A consumer rendering a tally needs the zeroes as much as the counts.
+    const r = voteEvent().messages[0].interactive.poll_response;
+    assert.equal(r.results.length, 2);
+    assert.deepEqual(r.results.map((o) => o.id), ["0", "1"]);
+    assert.equal(r.results[1].count, 0);
+});
+
+test("a group vote carries group_id; a DM vote carries none", () => {
+    assert.equal(voteEvent().messages[0].group_id, GROUP);
+    assert.ok(!("group_id" in voteEvent({ groupJid: undefined }).messages[0]));
+});
+
+test("a vote sits in the same envelope as every other event", () => {
+    const event = buildCloudPollVoteEvent(
+        {
+            id: "v", from: "1", timestamp: 1, pollMessageId: POLL_MSG_ID,
+            pollFrom: BOT_DIGITS, selected: [], results: [],
+        },
+        CLOUD_META
+    );
+    assert.equal(event.object, "whatsapp_business_account");
+    assert.equal(event.entry[0].changes[0].field, "messages");
+    assert.equal(event.entry[0].changes[0].value.metadata.phone_number_id, CLOUD_META.phoneNumberId);
 });

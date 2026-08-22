@@ -79,7 +79,9 @@ Meta's group support is narrower than it looks — its Groups API only addresses
 
 **`messages.upsert` type.** Only `"notify"` is a live message. `"append"` is history backfill — forwarding it makes bots reply to week-old messages.
 
-**Poll votes are encrypted** and can only be decrypted with the original creation message, which is why `polls` persists it as base64 proto.
+**Poll votes are decrypted by us, not by Baileys.** v7 has the poll-update path commented out and marked "TODO: Remove entirely", so `messages.update` never carries `pollUpdates` — a handler listening for it receives nothing, forever, silently. That is exactly what happened: 29 polls, zero votes. `handlePollVote` does the work Baileys used to: `decryptPollVote` with the `messageSecret` off the stored creation message, which is why `polls` persists it as base64 proto.
+
+A tally has to be accumulated here too — WhatsApp sends one vote at a time, never a total. `PollDoc.votes` holds the current selection per voter, replaced on change and removed when cleared, so counts go down as well as up. Option hashes, not names: a vote names its choices as SHA-256 of the option text, compared as hex because `toString()` differs between `Buffer` and `Uint8Array` and would silently never match.
 
 **`getImageDescription` and `transcribeVoice` fetch URLs server-side** (from GCP and from OpenAI). Media links must be absolute, public HTTPS, and live long enough — they can't be `localhost` or bearer-protected.
 

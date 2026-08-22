@@ -80,6 +80,24 @@ export interface PollDoc {
     message: string;
     name: string;
     options: string[];
+    /**
+     * Current selection per voter, replaced on every change.
+     *
+     * A tally has to be accumulated somewhere: WhatsApp sends one encrypted
+     * vote at a time, never a total. Keyed by voter so a changed vote overwrites
+     * rather than double-counts, and a cleared vote drops the entry — which is
+     * how the counts go back down.
+     *
+     * Option hashes rather than names: a vote names its choices as SHA-256 of
+     * the option text, and storing the hash keeps the comparison exact.
+     */
+    votes?: Array<{
+        /** Voter JID as WhatsApp addressed them — possibly a LID. */
+        voter: string;
+        /** hex SHA-256 of each chosen option's text. */
+        options: string[];
+        at: number;
+    }>;
     createdAt: Date;
 }
 
