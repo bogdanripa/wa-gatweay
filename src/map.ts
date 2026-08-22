@@ -158,7 +158,27 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
     return { kind: "skip" };
 }
 
+/**
+ * One mentioned identity, carrying both ids.
+ *
+ * LID is WhatsApp's canonical identifier going forward, and phone numbers are
+ * the thing being migrated away from — so the LID is what a consumer should key
+ * on, and `phone` is a convenience that may be null now and may disappear
+ * entirely later. Neither is dropped, so a consumer has a migration path rather
+ * than a cliff.
+ */
+export interface MentionedIdentity {
+    /** Canonical id. Null only for a mention that arrived as a phone JID whose LID we have never seen. */
+    lid: string | null;
+    /** Null when the mapping does not have it — that is expected, not an error. */
+    phone: string | null;
+}
+
 export interface ResolvedIds {
+    /** Every @-mention in this message, both ids each. */
+    mentions?: MentionedIdentity[];
+    /** The sender's LID, when known, beside the phone number in `from`. */
+    senderLid?: string | null;
     /**
      * Set only when the message is a reply. Additive: everything else in the
      * payload is unchanged whether this is present or not.

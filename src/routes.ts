@@ -115,6 +115,9 @@ export function makeApiRouter(manager: SessionManager): Router {
                 subject: meta.subject || "",
                 participants: participants.map((p) => ({
                     id: toUserId(p.id),
+                    // Null when the LID has not been seen on the wire. Present
+                    // so a consumer can key on it as phone numbers go away.
+                    lid: p.lid ?? null,
                     name: p.name,
                 })),
                 participants_count: participants.length,

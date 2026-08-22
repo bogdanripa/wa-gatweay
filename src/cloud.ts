@@ -342,6 +342,11 @@ export function buildCloudMessageEvent(
     // Meta's own shape for a reply, and set only when there is one. Added before
     // the type switch so it applies to every kind of message, not just text.
     if (ids.context) message.context = ids.context;
+    // Extensions, both additive. Meta models neither, because Meta has no LIDs —
+    // but a consumer that only ever sees phone numbers has no way through the
+    // migration when those stop being available.
+    if (ids.senderLid) message.from_lid = ids.senderLid;
+    if (ids.mentions?.length) message.mentions = ids.mentions;
 
     switch (cls.kind) {
         case "text":
@@ -389,7 +394,7 @@ export function buildCloudMessageEvent(
 export function buildCloudGroupEvent(
     groupJid: string,
     subject: string,
-    participants: Array<{ id: string; name?: string }>,
+    participants: Array<{ id: string; lid?: string | null; name?: string }>,
     meta: CloudMetadata
 ): Record<string, any> {
     return envelope(meta, "group_participants_update", {
@@ -397,7 +402,12 @@ export function buildCloudGroupEvent(
             {
                 group_id: toChatId(groupJid),
                 subject,
-                participants: participants.map((p) => ({ wa_id: toUserId(p.id), name: p.name })),
+                participants: participants.map((p) => ({
+                wa_id: toUserId(p.id),
+                // Kept beside the number for the same reason mentions carry it.
+                lid: p.lid ?? null,
+                name: p.name,
+            })),
             },
         ],
     });

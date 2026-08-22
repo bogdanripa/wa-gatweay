@@ -17,7 +17,13 @@ import { scopedId, type Stores } from "./store.js";
 import { useMongoAuthState } from "./authState.js";
 import { MediaStore } from "./media.js";
 import { WebhookSender } from "./webhook.js";
-import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "./map.js";
+import {
+    classify,
+    mentionedJidsOf,
+    quotedContextOf,
+    unwrap,
+    type MentionedIdentity,
+} from "./map.js";
 import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
@@ -569,7 +575,11 @@ export class Session {
             ? await this.media.save(msg, cls.mediaKind, this.sock!, this.id)
             : undefined;
 
-        await this.resolveMentions(cls, msg, isGroup ? msg.key.remoteJid : undefined);
+        const mentions = await this.resolveMentions(cls, msg, isGroup ? msg.key.remoteJid : undefined);
+
+        // The sender's LID, beside the phone number already in `from`.
+        const rawSender = String(key.participant || msg.participant || key.remoteJid || "");
+        const senderLid = isLidJid(rawSender) ? digitsOf(rawSender) : await this.lidFor(rawSender);
 
         // Only set when the message actually replies to something, so the payload
         // is byte-identical to before for everything else.
@@ -599,7 +609,15 @@ export class Session {
             isGroup,
         });
 
-        const ids = { chatJid, senderJid, chatName, senderName: msg.pushName || undefined, context };
+        const ids = {
+            chatJid,
+            senderJid,
+            chatName,
+            senderName: msg.pushName || undefined,
+            context,
+            mentions,
+            senderLid,
+        };
         const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
         if (event) await this.webhook.send(event);
     }
@@ -622,19 +640,52 @@ export class Session {
         cls: { text?: string; caption?: string },
         msg: WAMessage,
         groupJid?: string
-    ) {
-        const mentions = mentionedJidsOf(msg.message).filter(isLidJid);
-        if (!mentions.length) return;
+    ): Promise<MentionedIdentity[]> {
+        const jids = mentionedJidsOf(msg.message);
+        if (!jids.length) return [];
 
-        const mapping = new Map<string, string>();
-        for (const jid of mentions) {
-            const resolved = await this.resolveParticipant(jid, groupJid, "a mention");
-            if (resolved) mapping.set(digitsOf(jid), digitsOf(resolved));
+        const mentions: MentionedIdentity[] = [];
+        const rewrite = new Map<string, string>();
+
+        for (const jid of jids) {
+            if (isLidJid(jid)) {
+                const lid = digitsOf(jid);
+                const pn = await this.resolveParticipant(jid, groupJid, "a mention");
+                const phone = pn ? digitsOf(pn) : null;
+                // Only a resolved mention is rewritten in the body. An unresolved
+                // one stays a LID on purpose: deleting it or substituting a
+                // placeholder would change what the message says and hide that
+                // the mapping is missing.
+                if (phone) rewrite.set(lid, phone);
+                mentions.push({ lid, phone });
+            } else {
+                // Already a phone JID. WhatsApp does support phone → LID, so the
+                // canonical id can still be filled from the other direction.
+                mentions.push({ lid: await this.lidFor(jid), phone: digitsOf(jid) });
+            }
         }
-        if (!mapping.size) return;
 
-        cls.text = rewriteMentions(cls.text, mapping);
-        cls.caption = rewriteMentions(cls.caption, mapping);
+        if (rewrite.size) {
+            cls.text = rewriteMentions(cls.text, rewrite);
+            cls.caption = rewriteMentions(cls.caption, rewrite);
+        }
+        return mentions;
+    }
+
+    /**
+     * Phone → LID, the direction WhatsApp actually supports.
+     *
+     * Still best-effort: the store only knows pairings already seen on the wire.
+     * Null is a normal answer here, not a failure.
+     */
+    private async lidFor(jid: string): Promise<string | null> {
+        if (!jid || isGroupJid(jid) || isLidJid(jid)) return null;
+        try {
+            const lid = await this.sock?.signalRepository?.lidMapping?.getLIDForPN(stripDevice(jid));
+            return lid ? digitsOf(lid) : null;
+        } catch {
+            return null;
+        }
     }
 
     /**
@@ -1163,10 +1214,19 @@ export class Session {
      * `phoneNumber` alongside the (possibly LID) `id` — so prefer that, and only
      * fall back to a mapping lookup when it's absent.
      */
-    async groupParticipantIds(meta: GroupMetadata): Promise<Array<{ id: string; name?: string }>> {
+    async groupParticipantIds(
+        meta: GroupMetadata
+    ): Promise<Array<{ id: string; lid: string | null; name?: string }>> {
         return Promise.all(
             (meta.participants || []).map(async (p) => ({
                 id: p.phoneNumber || (await this.resolveToPn(p.id)),
+                // Carried for the same reason mentions carry it: the number is
+                // what the migration takes away, the LID is what survives it.
+                lid: (p as any).lid
+                    ? digitsOf((p as any).lid)
+                    : isLidJid(p.id)
+                      ? digitsOf(p.id)
+                      : null,
                 name: p.name || p.notify || undefined,
             }))
         );

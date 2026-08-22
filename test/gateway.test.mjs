@@ -334,7 +334,7 @@ test("a group message carries group_id, with the participant in from", () => {
     const event = buildCloudMessageEvent(
         { key: { id: "wamid.G", remoteJid: GROUP, participant: USER }, messageTimestamp: 1 },
         { kind: "text", text: "yo" },
-        { chatJid: GROUP, senderJid: USER, chatName: "Team", senderName: "Bogdan" },
+        { chatJid: GROUP, senderJid: USER, chatName: "Team", senderName: "Alex Doe" },
         CLOUD_META
     );
     const msg = event.entry[0].changes[0].value.messages[0];
@@ -385,12 +385,16 @@ test("skipped classifications produce no cloud event either", () => {
 });
 
 test("group participant events use Meta's group_participants_update field", () => {
-    const event = buildCloudGroupEvent(GROUP, "Team", [{ id: USER, name: "Bogdan" }], CLOUD_META);
+    const event = buildCloudGroupEvent(GROUP, "Team", [{ id: USER, name: "Alex Doe" }], CLOUD_META);
     assert.equal(event.entry[0].changes[0].field, "group_participants_update");
     const group = event.entry[0].changes[0].value.groups[0];
     assert.equal(group.group_id, GROUP);
     assert.equal(group.subject, "Team");
-    assert.deepEqual(group.participants, [{ wa_id: "12025550100", name: "Bogdan" }]);
+    // `lid` is additive and null when unknown — a participant whose LID has not
+    // been seen still appears, rather than being withheld.
+    assert.deepEqual(group.participants, [
+        { wa_id: "12025550100", lid: null, name: "Alex Doe" },
+    ]);
 });
 
 /**
@@ -749,4 +753,64 @@ test("a vote sits in the same envelope as every other event", () => {
     assert.equal(event.object, "whatsapp_business_account");
     assert.equal(event.entry[0].changes[0].field, "messages");
     assert.equal(event.entry[0].changes[0].value.metadata.phone_number_id, CLOUD_META.phoneNumberId);
+});
+
+// -------------------------------------------------------------- mention identity
+//
+// LID is WhatsApp's canonical id going forward and phone numbers are what the
+// migration removes, so both are carried and neither is ever dropped.
+
+test("a resolved mention carries both ids", () => {
+    const msg = withContext(
+        { extendedTextMessage: { text: "@12025550100 hi" } },
+        { mentions: [{ lid: "81656102801535", phone: "12025550100" }] }
+    );
+    assert.deepEqual(msg.mentions, [{ lid: "81656102801535", phone: "12025550100" }]);
+});
+
+test("an unresolved mention still carries the LID, with phone null", () => {
+    // The case that matters: someone who has never spoken, so the mapping has
+    // never seen them. Null is a normal answer, not an error.
+    const msg = withContext(
+        { extendedTextMessage: { text: "@99887766554433 hi" } },
+        { mentions: [{ lid: "99887766554433", phone: null }] }
+    );
+    assert.deepEqual(msg.mentions, [{ lid: "99887766554433", phone: null }]);
+    // And the body keeps the raw LID rather than losing the mention.
+    assert.match(msg.text.body, /@99887766554433/);
+});
+
+test("a message with no mentions carries no mentions key", () => {
+    assert.ok(!("mentions" in withContext({ conversation: "plain" })));
+});
+
+test("the sender's LID rides alongside the phone number in from", () => {
+    const msg = withContext({ conversation: "hi" }, { senderLid: "81656102801535" });
+    assert.equal(msg.from, "12025550100");
+    assert.equal(msg.from_lid, "81656102801535");
+});
+
+test("group participants carry both ids too", () => {
+    const group = buildCloudGroupEvent(
+        GROUP,
+        "Team",
+        [
+            { id: USER, lid: "81656102801535", name: "Alex Doe" },
+            { id: "12025550142@s.whatsapp.net", lid: null, name: "Sam" },
+        ],
+        CLOUD_META
+    ).entry[0].changes[0].value.groups[0];
+    assert.deepEqual(group.participants, [
+        { wa_id: "12025550100", lid: "81656102801535", name: "Alex Doe" },
+        { wa_id: "12025550142", lid: null, name: "Sam" },
+    ]);
+});
+
+test("an unresolved mention is never rewritten into a fake number", () => {
+    // rewriteMentions only touches tokens the caller mapped, and an unresolved
+    // mention is never added to that mapping.
+    assert.equal(
+        rewriteMentions("@99887766554433 hi", new Map([["81656102801535", "12025550100"]])),
+        "@99887766554433 hi"
+    );
 });

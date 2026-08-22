@@ -316,6 +316,61 @@
     can tell someone replied to it.
   </p>
 
+  <h3>Mentions and identities</h3>
+  <div class="note">
+    <strong>WhatsApp is migrating identities from phone numbers to LIDs.</strong> A LID is
+    an opaque id like <code>81656102801535</code> — it is not a phone number, and nothing
+    downstream can tell the two apart by looking. LID → phone is <em>not</em> generally
+    supported: the mapping is learned opportunistically from traffic, so it will sometimes
+    be missing, and is expected to get harder as the migration proceeds. WhatsApp treats
+    the LID as canonical going forward.
+  </div>
+  <p>
+    So both ids are carried, and neither is ever thrown away. A message that @-mentions
+    someone gains a <code>mentions</code> array, and the sender's LID rides beside the
+    phone number already in <code>from</code>:
+  </p>
+  <pre><code>"messages": [ {
+  "from": "12025550100",
+  "from_lid": "81656102801535",
+  "type": "text",
+  "text": { "body": "@12025550100 pe la cat plecati?" },
+  "mentions": [
+    { "lid": "81656102801535", "phone": "12025550100" },
+    { "lid": "99887766554433", "phone": null }
+  ]
+} ]</code></pre>
+
+  <table>
+    <thead><tr><th>field</th><th></th></tr></thead>
+    <tbody>
+      <tr><td><code>lid</code></td><td>The canonical identity. Key on this — it is the id
+        that survives the migration. Null only for a mention that arrived as a phone
+        number whose LID has never been seen.</td></tr>
+      <tr><td><code>phone</code></td><td>The convenience, and <strong>it may be
+        null</strong>. That is a normal answer, not an error: it means the gateway has
+        never seen that person's LID paired with a number on the wire — typically someone
+        who has never spoken in the group.</td></tr>
+    </tbody>
+  </table>
+
+  <p class="muted">
+    In the message body, a mention whose phone number is known is rewritten to that
+    number, so the text matches the roster. One that <strong>cannot</strong> be resolved
+    is left as the raw LID — deliberately. Deleting it or replacing it with a placeholder
+    would change what the message says and hide that the mapping is missing, whereas a
+    visible unresolved id is a signal worth acting on. The rewrite only ever touches ids
+    WhatsApp itself listed as mentions, so a number somebody typed by hand is never
+    altered.
+  </p>
+  <p class="muted">
+    Group participants carry the same pair — <code>wa_id</code> and <code>lid</code> — in
+    both the <code>group_participants_update</code> webhook and
+    <code>GET /groups/:id</code>, for the same reason: when phone numbers stop being
+    available in groups, a consumer keyed on the LID keeps working instead of hitting a
+    cliff.
+  </p>
+
   <h3>Message types</h3>
   <table>
     <thead><tr><th>type</th><th>payload</th></tr></thead>
