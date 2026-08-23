@@ -170,6 +170,7 @@ And the management API behind the console, all of it requiring `Authorization: B
 npm run build
 npm test              # 83 unit tests — pure mappers and Cloud API shapes
 npm run test:smoke    # 71 boot checks against a real mongod, two numbers
+                      # SMOKE_PORT=9791 … if 8791-8793 are taken
 ```
 
 The webhook and send-shape tests assert against **examples from Meta's published documentation**, not against this code's own output — so they fail if the payloads drift from what a Cloud API client expects. Asserting against our own shapes would prove only self-consistency.

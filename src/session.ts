@@ -622,6 +622,39 @@ export class Session {
             senderLid,
         };
         const event = buildCloudMessageEvent(msg, cls, ids, this.cloudMeta(), media);
+
+        // The other half of the trace, with "webhook delivered" as its pair: at
+        // `info` so that "did the gateway see it?" and "did the bot get it?" are
+        // both answerable from the logs, without reading Mongo.
+        //
+        // Metadata only — never the body, the caption or a filename's contents.
+        // These logs are read in a terminal by whoever is debugging, and message
+        // content is not theirs to read. `document` is the exception that proves
+        // it: the name of a file IS the thing you need to identify it later,
+        // because nothing else about it is stored here.
+        this.log.info(
+            {
+                id: msg.key.id,
+                type: cls.kind,
+                from: toUserId(senderJid),
+                chat: isGroup ? chatName || msg.key.remoteJid : undefined,
+                group: isGroup || undefined,
+                mentions: mentions?.length || undefined,
+                replyTo: context?.id,
+                // Present exactly when something was downloaded and re-hosted,
+                // which is the question you ask when a link 404s.
+                media: media?.link,
+                ...(cls.kind === "document"
+                    ? {
+                          filename: cls.document?.filename,
+                          mime: cls.document?.mimetype,
+                          bytes: cls.document?.size,
+                      }
+                    : {}),
+            },
+            "message received"
+        );
+
         if (event) await this.webhook.send(event);
     }
 
@@ -782,7 +815,10 @@ export class Session {
                         voterJid: attempt.voter,
                     });
                     voterJid = attempt.voter;
-                    this.log.debug({ pollId, ...attempt }, "poll vote decrypted");
+                    // `info` because this path silently emitted nothing for
+                    // weeks — 29 polls and zero votes — and a debug line would
+                    // not have shown that either.
+                    this.log.info({ pollId, ...attempt }, "poll vote decrypted");
                     break;
                 } catch {
                     // Wrong form for this chat; try the next.
@@ -1034,6 +1070,39 @@ export class Session {
      * the group id for a group, the recipient's digits otherwise.
      */
     async sendCloud(req: CloudSendRequest): Promise<{ messageId?: string; waId: string }> {
+        const k = req.kind;
+        const startedAt = Date.now();
+        let result: { messageId?: string; waId: string };
+        try {
+            result = await this.dispatchCloud(req);
+        } catch (e) {
+            // The route logs the error too, but without the type or recipient —
+            // and "which send failed" is the first question. A rejected request
+            // is the caller's mistake, so it stays a warn.
+            this.log.warn(
+                { e, type: k.type, to: req.to, ms: Date.now() - startedAt },
+                "send failed"
+            );
+            throw e;
+        }
+        // The outbound counterpart of "message received". Without it a bot that
+        // says it sent something and a number that never showed it are two
+        // claims with nothing between them; this is that something. Metadata
+        // only, for the same reason the inbound line is.
+        this.log.info(
+            {
+                id: result.messageId,
+                type: k.type,
+                to: result.waId || undefined,
+                group: result.waId ? isGroupJid(toWaJid(req.to) || "") || undefined : undefined,
+                ms: Date.now() - startedAt,
+            },
+            "message sent"
+        );
+        return result;
+    }
+
+    private async dispatchCloud(req: CloudSendRequest): Promise<{ messageId?: string; waId: string }> {
         const k = req.kind;
 
         // A status update carries no recipient at all.
@@ -1418,8 +1487,23 @@ export class Session {
     /** Meta's media-metadata answer, for a document this session received. */
     async documentMetadata(mediaId: string) {
         const found = await this.documentOf(mediaId);
-        if (!found) return null;
+        if (!found) {
+            // A 404 here is the one failure a client cannot tell apart from the
+            // others by design, so the log is where the difference has to live —
+            // otherwise "it says 404" is unanswerable.
+            this.log.info({ id: mediaId }, "media lookup for an id this number does not hold");
+            return null;
+        }
         const d = found.doc;
+        this.log.info(
+            {
+                id: mediaId,
+                filename: d.fileName,
+                mime: d.mimetype,
+                bytes: d.fileLength ? Number(d.fileLength) : undefined,
+            },
+            "media lookup"
+        );
         return {
             mimetype: d.mimetype || "application/octet-stream",
             filename: d.fileName || undefined,
@@ -1441,14 +1525,24 @@ export class Session {
         mediaId: string
     ): Promise<{ stream: Readable; mimetype: string; filename?: string } | null> {
         const found = await this.documentOf(mediaId);
-        if (!found) return null;
+        if (!found) {
+            this.log.info({ id: mediaId }, "document requested that this number does not hold");
+            return null;
+        }
 
         const sock = this.sock;
         if (!sock) {
             // Fetching needs a live socket for the re-upload path below, and a
             // reconnect is usually seconds away — 503 is the honest answer.
+            this.log.warn({ id: mediaId }, "document requested while disconnected");
             throw new Error("this number is not connected to WhatsApp right now");
         }
+
+        const startedAt = Date.now();
+        this.log.info(
+            { id: mediaId, filename: found.doc.fileName, bytes: found.doc.fileLength ? Number(found.doc.fileLength) : undefined },
+            "document fetch started"
+        );
 
         const stream = (await downloadMediaMessage(
             found.msg,
@@ -1462,6 +1556,20 @@ export class Session {
                 reuploadRequest: sock.updateMediaMessage,
             }
         )) as unknown as Readable;
+
+        // Counted here rather than in the route because this is the only place
+        // that sees every byte: a truncated download reads as a success from the
+        // HTTP side, and the gap between this and `bytes` above is the symptom.
+        let sent = 0;
+        stream.on("data", (chunk: Buffer) => {
+            sent += chunk.length;
+        });
+        stream.on("end", () => {
+            this.log.info(
+                { id: mediaId, bytes: sent, ms: Date.now() - startedAt },
+                "document fetch complete"
+            );
+        });
 
         return {
             stream,

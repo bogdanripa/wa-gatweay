@@ -85,6 +85,12 @@ Meta's group support is narrower than it looks — its Groups API only addresses
 
 A tally has to be accumulated here too — WhatsApp sends one vote at a time, never a total. `PollDoc.votes` holds the current selection per voter, replaced on change and removed when cleared, so counts go down as well as up. Option hashes, not names: a vote names its choices as SHA-256 of the option text, compared as hex because `toString()` differs between `Buffer` and `Uint8Array` and would silently never match.
 
+**Every message is traceable end to end at `info`, and must stay that way.** `message received` → `webhook delivered` (or `no webhook configured, event discarded`) is one pair of lines per inbound message, keyed on the same message id; `message sent` / `send failed` is the outbound half. Before these existed a successful message logged *nothing*, so "did the gateway see it?" and "did the bot get it?" could only be answered by reading Mongo. Don't demote them to `debug` to quiet the logs — a WhatsApp number produces these at human speed, and the volume was never the problem.
+
+The same rule is why `poll vote decrypted` is `info`: that path emitted nothing at all for weeks (29 polls, zero votes), and a debug line would not have revealed that either. A 401 is logged for the same reason — a rotated token otherwise presents as a bot that has simply gone quiet.
+
+**Logs carry metadata, never content.** Not the body, not a caption, not the token, not a webhook URL's query string (they routinely carry a shared secret — `redactUrl` drops it). These are read in a terminal by whoever is debugging, and message content is not theirs to read; it is the same rule that keeps the pairing code off `/health`. The single exception is a document's **filename**, because nothing else about the file is stored here and the name is what identifies it later.
+
 **Documents are never downloaded on receipt, and that is load-bearing.** Images, video and audio are fetched, decrypted and served from `mediaDir` behind an unguessable link, because a consumer hands those links to a model that will not send our headers. Documents go the other way — the webhook carries `document.id` and no link, and the bytes are streamed straight from WhatsApp when a client asks. Meta's own flow is the same two steps, so this costs no compatibility.
 
 The reason is proportion: most files posted in a group are never read by any bot, and this runs on a Raspberry Pi. Downloading them all means warehousing everybody's documents for the few that matter. Don't "fix" the asymmetry by making documents behave like images — and don't add a cache on the way through either.
@@ -123,10 +129,13 @@ What *is* kept is a pointer: `rememberKey` stores the message proto for an inbou
 ```bash
 npm run build && npm test          # 83 unit tests, pure mappers and Cloud shapes
 npm run test:smoke                 # 71 boot checks, real mongod, two numbers
+                                   # SMOKE_PORT=9791 … if 8791-8793 are taken
 npm run dev:console                # the console on http://127.0.0.1:8080
 ```
 
 `npm test` globs `test/*.test.mjs`, not `test/*.mjs` — the smoke test is a standalone script, and `node --test` would happily run it as a test file, spawning a mongod and a real WhatsApp connection every time anyone ran the unit tests.
+
+It takes ports 8791-8793 and now refuses to start if any is occupied, rather than testing whatever else answers there — an unrelated app on 8791 once replied to `/api/health` with its own JSON and the suite reported the gateway's health as broken. The check probes by *connecting*: binding is the obvious test and it silently passes, because SO_REUSEADDR lets a second socket bind `127.0.0.1` when the squatter holds IPv6 `*`.
 
 The smoke test spawns the real server and needs outbound network to WhatsApp — its QR checks verify a live WebSocket handshake. It starts with **zero** numbers, adds them over the management API, and restarts the process to prove they outlive the container. It also boots several deliberately-broken configs and asserts they exit non-zero.
 

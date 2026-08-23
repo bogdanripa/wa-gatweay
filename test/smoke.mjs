@@ -15,16 +15,60 @@ import { MongoMemoryServer } from "mongodb-memory-server";
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 
 const mongo = await MongoMemoryServer.create();
-const PORT = 8791;
+const PORT = Number(process.env.SMOKE_PORT || 8791);
 const base = `http://127.0.0.1:${PORT}/api`;
 const MGMT_KEY = "smoke-management-key-abcdefgh";
 
+/**
+ * Refuse to run if something already holds one of our ports.
+ *
+ * `boot()` waits for `/api/health` to answer and calls that success. If another
+ * process owns the port, the wait succeeds against *that* server and every
+ * check afterwards reports on software this repo did not build — which reads as
+ * a pile of genuine-looking failures in the gateway. It cost a debugging round:
+ * an unrelated app on 8791 answered /api/health with its own JSON, and the
+ * suite dutifully reported that health was broken.
+ */
+async function requireFreePort(port, what) {
+    // Probed by CONNECTING, not by binding. Binding is the obvious check and it
+    // does not work: the squatter here listened on IPv6 `*`, and SO_REUSEADDR
+    // then lets a second socket bind 127.0.0.1 quite happily — so the probe
+    // said "free", the server said "listening", and every request still went to
+    // the other process. A successful connect is the only thing that actually
+    // proves someone is there.
+    const free = await new Promise((resolve) => {
+        const sock = connect({ port, host: "127.0.0.1" });
+        const done = (result) => {
+            sock.destroy();
+            resolve(result);
+        };
+        sock.setTimeout(1000, () => done(true));
+        sock.once("connect", () => done(false));
+        sock.once("error", () => done(true));
+    });
+    if (!free) {
+        console.error(
+            `\nport ${port} (${what}) is already in use — something else is listening there.\n` +
+                `Stop it, or run with a different base port:  SMOKE_PORT=9791 npm run test:smoke\n`
+        );
+        await mongo.stop();
+        process.exit(1);
+    }
+}
+
+await requireFreePort(PORT, "the gateway under test");
+await requireFreePort(PORT + 1, "webhook sink A");
+await requireFreePort(PORT + 2, "webhook sink B");
+
 // Two webhook sinks, one per bot, so we can tell which number delivered what.
 const hits = { a: 0, b: 0 };
-const sinkA = createServer((_q, r) => (hits.a++, r.writeHead(200).end("{}"))).listen(8792);
-const sinkB = createServer((_q, r) => (hits.b++, r.writeHead(200).end("{}"))).listen(8793);
+const sinkA = createServer((_q, r) => (hits.a++, r.writeHead(200).end("{}"))).listen(PORT + 1);
+const sinkB = createServer((_q, r) => (hits.b++, r.writeHead(200).end("{}"))).listen(PORT + 2);
+const sinkAUrl = `http://127.0.0.1:${PORT + 1}`;
+const sinkBUrl = `http://127.0.0.1:${PORT + 2}`;
 
 const baseEnv = {
     ...process.env,
@@ -176,7 +220,7 @@ try {
 
     const created = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "alpha-bot", webhookUrl: "http://127.0.0.1:8792/webhook" }),
+        body: JSON.stringify({ id: "alpha-bot", webhookUrl: `${sinkAUrl}/webhook` }),
     });
     const createdJson = await created.json();
     tokenA = createdJson?.number?.token || "";
@@ -188,7 +232,7 @@ try {
             method: "POST",
             body: JSON.stringify({
                 id: "second-bot",
-                webhookUrl: "http://127.0.0.1:8793/webhook",
+                webhookUrl: `${sinkBUrl}/webhook`,
                 sendRatePerMinute: 5,
             }),
         })
@@ -200,7 +244,7 @@ try {
 
     const badId = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "bad:id", webhookUrl: "http://127.0.0.1:8792/webhook" }),
+        body: JSON.stringify({ id: "bad:id", webhookUrl: `${sinkAUrl}/webhook` }),
     });
     check(
         "an id that would break key namespacing is a 400",
@@ -210,7 +254,7 @@ try {
 
     const dupId = await mgmt("/numbers", {
         method: "POST",
-        body: JSON.stringify({ id: "alpha-bot", webhookUrl: "http://127.0.0.1:8792/webhook" }),
+        body: JSON.stringify({ id: "alpha-bot", webhookUrl: `${sinkAUrl}/webhook` }),
     });
     check("a duplicate id is refused", dupId.status === 400, `status=${dupId.status}`);
 
@@ -281,12 +325,12 @@ try {
     // Adding one later must not require re-pairing.
     await mgmt("/numbers/later", {
         method: "PATCH",
-        body: JSON.stringify({ webhookUrl: "http://127.0.0.1:8792/added-later" }),
+        body: JSON.stringify({ webhookUrl: `${sinkAUrl}/added-later` }),
     });
     const afterAdd = await (await mgmt("/numbers")).json();
     check(
         "a webhook can be attached afterwards",
-        afterAdd.numbers.find((n) => n.id === "later")?.webhookUrl === "http://127.0.0.1:8792/added-later"
+        afterAdd.numbers.find((n) => n.id === "later")?.webhookUrl === `${sinkAUrl}/added-later`
     );
 
     // And removed again by clearing the field.
@@ -391,12 +435,12 @@ try {
 
     await mgmt("/numbers/second-bot", {
         method: "PATCH",
-        body: JSON.stringify({ webhookUrl: "http://127.0.0.1:8793/moved" }),
+        body: JSON.stringify({ webhookUrl: `${sinkBUrl}/moved` }),
     });
     const afterEdit = await (await mgmt("/numbers")).json();
     check(
         "editing a webhook URL sticks",
-        afterEdit.numbers.find((n) => n.id === "second-bot")?.webhookUrl === "http://127.0.0.1:8793/moved"
+        afterEdit.numbers.find((n) => n.id === "second-bot")?.webhookUrl === `${sinkBUrl}/moved`
     );
 
     const rotated = await (await mgmt("/numbers/second-bot/rotate-token", { method: "POST" })).json();

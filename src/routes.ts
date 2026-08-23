@@ -91,6 +91,10 @@ export function makeApiRouter(manager: SessionManager): Router {
             const token = bearerOf(req);
             const session = token ? manager.byTokenOrNull(token) : null;
             if (!session) {
+                // A rotated token presents as a bot that has simply gone quiet,
+                // with nothing anywhere to say why. The token itself is never
+                // logged — only whether one was sent at all.
+                refused(req, token ? "the bearer token matches no number" : "no bearer token");
                 res.status(401).json({ error: { message: "unauthorized" } });
                 return;
             }
@@ -245,6 +249,7 @@ export function makeApiRouter(manager: SessionManager): Router {
         }
         const session = manager.byTokenOrNull(token);
         if (!session) {
+            refused(req, "the bearer token matches no number");
             res.status(401).json({ error: { message: "unauthorized" } });
             return;
         }

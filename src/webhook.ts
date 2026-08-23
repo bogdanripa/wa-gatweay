@@ -59,7 +59,10 @@ export class WebhookSender {
         // and left alone for a week floods its bot with stale conversation the
         // moment someone sets one, and the bots act on what they receive.
         if (!this.url) {
-            this.log.debug({ keys: Object.keys(payload) }, "no webhook configured, event discarded");
+            this.log.info(
+                { keys: Object.keys(payload), id: firstMessageId(payload) },
+                "no webhook configured, event discarded"
+            );
             return Promise.resolve();
         }
 
@@ -78,6 +81,7 @@ export class WebhookSender {
 
     private async deliver(payload: Record<string, any>, attempt = 1): Promise<void> {
         const MAX_ATTEMPTS = 4;
+        const startedAt = Date.now();
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 30_000);
@@ -110,21 +114,72 @@ export class WebhookSender {
             }
             this.lastDeliveryAt = new Date();
             this.lastFailure = undefined;
-            this.log.debug({ keys: Object.keys(payload) }, "webhook delivered");
+            // `info`, not `debug`: this and the "message received" line either
+            // side of it are what makes "did the bot get it?" answerable from
+            // the logs alone. It is one line per event, which a WhatsApp number
+            // generates at human speed — the volume is fine and the alternative
+            // is reading Mongo to trace anything.
+            this.log.info(
+                {
+                    status: res.status,
+                    ms: Date.now() - startedAt,
+                    attempt,
+                    // Field names only. The payload carries message bodies.
+                    keys: Object.keys(payload),
+                    id: firstMessageId(payload),
+                },
+                "webhook delivered"
+            );
         } catch (e) {
             if (attempt >= MAX_ATTEMPTS) {
                 this.lastFailure = {
                     at: new Date(),
                     message: e instanceof Error ? e.message : String(e),
                 };
-                this.log.error({ e, attempt }, "webhook delivery failed, giving up");
+                this.log.error(
+                    { e, attempt, id: firstMessageId(payload), url: redactUrl(this.url) },
+                    "webhook delivery failed, giving up"
+                );
                 return;
             }
             // 1s, 4s, 9s — quadratic keeps the tail short while still backing off.
             const waitMs = attempt * attempt * 1000;
-            this.log.warn({ e, attempt, waitMs }, "webhook delivery failed, retrying");
+            this.log.warn(
+                { e, attempt, waitMs, id: firstMessageId(payload), url: redactUrl(this.url) },
+                "webhook delivery failed, retrying"
+            );
             await new Promise((r) => setTimeout(r, waitMs));
             return this.deliver(payload, attempt + 1);
         }
+    }
+}
+
+/**
+ * The message id inside a Cloud API envelope, for the log line.
+ *
+ * Every trace of an event through this gateway keys on this id — it is what the
+ * webhook carries, what a bot quotes back, and what names a document. Digging it
+ * out of the nesting once here is what lets a delivery line be matched to the
+ * "message received" line that produced it.
+ */
+function firstMessageId(payload: Record<string, any>): string | undefined {
+    const value = payload?.entry?.[0]?.changes?.[0]?.value;
+    return value?.messages?.[0]?.id ?? value?.messages_updates?.[0]?.id ?? undefined;
+}
+
+/**
+ * A webhook URL with its query string dropped.
+ *
+ * Webhook URLs routinely carry a shared secret in the query — logging one on
+ * every failed delivery would write it into the container logs, which is the
+ * same mistake as the pairing code on /health.
+ */
+function redactUrl(url: string | undefined): string | undefined {
+    if (!url) return undefined;
+    try {
+        const u = new URL(url);
+        return `${u.origin}${u.pathname}`;
+    } catch {
+        return undefined;
     }
 }
