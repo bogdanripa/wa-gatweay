@@ -12,7 +12,8 @@ It owns the WhatsApp sessions and speaks two protocols:
 wa-gateway (Pi 5) ──────┤                                       ├──────────────►│
                         └─ session "beta-bot"  ⇄ WhatsApp #2 ─┘                └─ another bot (anywhere)
                            ├─ Mongo-backed auth state, namespaced per session
-                           └─ media downloaded, decrypted, served over HTTPS
+                           └─ image/audio/video downloaded, decrypted, served
+                              over HTTPS; documents streamed on request
 ```
 
 Routing is by bearer token, as the hosted APIs do it. Each bot sends its own token and reaches its own number — which is why adding a second number is a config change on both sides and **no code change on either**.
@@ -34,7 +35,7 @@ Three consequences worth internalising before you deploy:
 
 1. **Exactly one instance.** Two gateway instances on the same credentials fight over each device slot, and WhatsApp resolves that by logging you out. The gateway detects it (`connectionReplaced`) and deliberately *stops* that session rather than reconnecting into a flap war. Two sessions sharing an id would cause the same thing, so ids are unique by construction (they're the primary key) and tokens carry a unique index.
 2. **Auth state lives in Mongo, not on disk.** Pironman replaces the container on every redeploy. Baileys' bundled `useMultiFileAuthState` writes files, so with it you'd re-scan every QR after each deploy — and the Baileys docs say outright not to use it in production.
-3. **Media has to be re-hosted.** Consumers expect plain HTTPS links. Baileys hands you encrypted blobs. The gateway downloads, decrypts and serves them from its own public URL — which is what a bot, or a model it hands the URL to, actually fetches.
+3. **Media has to be re-hosted.** Consumers expect plain HTTPS links. Baileys hands you encrypted blobs. The gateway downloads, decrypts and serves them from its own public URL — which is what a bot, or a model it hands the URL to, actually fetches. Documents are the deliberate exception: they arrive as an id and are streamed on request, because most files posted in a group are never read by any bot and this runs on a Pi.
 
 ---
 
@@ -122,10 +123,12 @@ Paths are relative to the base URL, which is `https://<host>/api`:
 |---|---|
 | `POST /<PHONE_NUMBER_ID>/messages` | every send — text, media, location, reaction, poll, and the `status: "read"` update |
 | `GET /groups/:id` | a group's roster and subject |
+| `GET /<MEDIA_ID>` | Meta's media lookup — turns a document id from a webhook into a URL |
+| `GET /documents/<MEDIA_ID>` | the document itself, streamed from WhatsApp, never stored here |
 
 One send endpoint, as Meta has it. The per-verb routes this started with (`/messages/text`, `/messages/image`, `/messages/poll`, `PUT /messages/:id`, `PUT /messages/:id/reaction`, `PUT /presences/:to`) are gone — each was a second way to say what the Cloud shape already says, and two surfaces mean two to keep honest.
 
-Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, link preview), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies).
+Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, document, link preview), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies).
 
 Plus gateway-only: `GET /api/health`, `GET /api/ready`, `GET /api/media/:id`.
 
@@ -155,7 +158,9 @@ And the management API behind the console, all of it requiring `Authorization: B
 
 **Sessions fail independently.** One number with a corrupt auth document, a logout, or a conflict doesn't stop the others from starting or running.
 
-**Non-GIF videos, stickers and documents are dropped at the gateway.** There is no payload shape for them, so forwarding an empty envelope would only make a consumer log and discard it.
+**Non-GIF videos and stickers are dropped at the gateway.** There is no payload shape for them, so forwarding an empty envelope would only make a consumer log and discard it.
+
+**Documents arrive as metadata, not bytes.** A `document` message names the file — filename, mime type, size, sha256 — and carries a media id. Nothing is downloaded until a client exchanges that id for a URL and fetches it, which is Meta's own two-step flow. The pointer is kept for a week; after that the id 404s.
 
 ---
 
@@ -163,8 +168,8 @@ And the management API behind the console, all of it requiring `Authorization: B
 
 ```bash
 npm run build
-npm test              # 28 unit tests — pure mappers
-npm run test:smoke    # 49 boot checks against a real mongod, two numbers
+npm test              # 83 unit tests — pure mappers and Cloud API shapes
+npm run test:smoke    # 71 boot checks against a real mongod, two numbers
 ```
 
 The webhook and send-shape tests assert against **examples from Meta's published documentation**, not against this code's own output — so they fail if the payloads drift from what a Cloud API client expects. Asserting against our own shapes would prove only self-consistency.

@@ -85,6 +85,14 @@ Meta's group support is narrower than it looks — its Groups API only addresses
 
 A tally has to be accumulated here too — WhatsApp sends one vote at a time, never a total. `PollDoc.votes` holds the current selection per voter, replaced on change and removed when cleared, so counts go down as well as up. Option hashes, not names: a vote names its choices as SHA-256 of the option text, compared as hex because `toString()` differs between `Buffer` and `Uint8Array` and would silently never match.
 
+**Documents are never downloaded on receipt, and that is load-bearing.** Images, video and audio are fetched, decrypted and served from `mediaDir` behind an unguessable link, because a consumer hands those links to a model that will not send our headers. Documents go the other way — the webhook carries `document.id` and no link, and the bytes are streamed straight from WhatsApp when a client asks. Meta's own flow is the same two steps, so this costs no compatibility.
+
+The reason is proportion: most files posted in a group are never read by any bot, and this runs on a Raspberry Pi. Downloading them all means warehousing everybody's documents for the few that matter. Don't "fix" the asymmetry by making documents behave like images — and don't add a cache on the way through either.
+
+What *is* kept is a pointer: `rememberKey` stores the message proto for an inbound document (url, mediaKey, fileEncSha256 — no bytes), which is the second reason `MessageKeyDoc.message` exists. That collection's week-long TTL is therefore also the window in which a document stays fetchable, and `session.documentOf` returns null for expired, unknown and other-session ids alike so a client can't probe the difference.
+
+`GET /api/<MEDIA_ID>` is registered **last** on the API router because it claims the whole single-segment GET space, which is where Meta puts it; its auth is inline rather than in the router's middleware list so a mistyped path still 404s instead of 401ing. Both it and `/api/documents/<MEDIA_ID>` require the session token — a document is fetched by the bot itself, so unlike a media link it can be protected properly.
+
 **`getImageDescription` and `transcribeVoice` fetch URLs server-side** (from GCP and from OpenAI). Media links must be absolute, public HTTPS, and live long enough — they can't be `localhost` or bearer-protected.
 
 ## Layout
@@ -113,8 +121,8 @@ A tally has to be accumulated here too — WhatsApp sends one vote at a time, ne
 ## Testing
 
 ```bash
-npm run build && npm test          # 28 unit tests, pure mappers
-npm run test:smoke                 # 49 boot checks, real mongod, two numbers
+npm run build && npm test          # 83 unit tests, pure mappers and Cloud shapes
+npm run test:smoke                 # 71 boot checks, real mongod, two numbers
 npm run dev:console                # the console on http://127.0.0.1:8080
 ```
 

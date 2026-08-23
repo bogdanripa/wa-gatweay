@@ -14,7 +14,7 @@ export type MediaKind = "image" | "gif" | "voice" | "audio";
 
 export interface Classification {
     /** How a consumer should read this message. "skip" means don't forward at all. */
-    kind: "text" | MediaKind | "link_preview" | "skip";
+    kind: "text" | MediaKind | "document" | "link_preview" | "skip";
     /** Plain body text, when there is one. */
     text?: string;
     /** Caption riding along with media. */
@@ -23,6 +23,17 @@ export interface Classification {
     preview?: { title: string; description?: string };
     /** Populated for media kinds — the node session.ts must download. */
     mediaKind?: MediaKind;
+    /**
+     * Set for a document. Deliberately NOT a `mediaKind`: documents are never
+     * downloaded on receipt. Only the metadata travels, and the bytes are
+     * fetched from WhatsApp if and when a client asks for them.
+     */
+    document?: {
+        filename?: string;
+        mimetype?: string;
+        sha256?: string;
+        size?: number;
+    };
 }
 
 /** Unwrap the layers WhatsApp wraps messages in (ephemeral, view-once, edits). */
@@ -147,12 +158,26 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
         };
     }
 
+    if (m.documentMessage) {
+        const d = m.documentMessage;
+        return {
+            kind: "document",
+            caption: d.caption || undefined,
+            document: {
+                filename: d.fileName || undefined,
+                mimetype: d.mimetype || undefined,
+                sha256: d.fileSha256 ? Buffer.from(d.fileSha256).toString("base64") : undefined,
+                size: d.fileLength ? Number(d.fileLength) : undefined,
+            },
+        };
+    }
+
     if (m.audioMessage) {
         const isVoice = !!m.audioMessage.ptt;
         return { kind: isVoice ? "voice" : "audio", mediaKind: isVoice ? "voice" : "audio" };
     }
 
-    // Stickers, documents, contacts, locations, polls, reactions, protocol
+    // Stickers, contacts, locations, polls, reactions, protocol
     // messages: there is no payload shape for these, so forwarding an empty
     // envelope would only make a consumer log and discard it.
     return { kind: "skip" };

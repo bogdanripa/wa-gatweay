@@ -22,6 +22,7 @@
   <a href="#send">Sending</a>
   <a href="#groups">Groups</a>
   <a href="#webhook">Receiving</a>
+  <a href="#documents">Documents</a>
   <a href="#status">Status</a>
   <a href="#manage">Managing numbers</a>
   <a href="#differences">Differences from Meta</a>
@@ -379,14 +380,21 @@
       <tr><td><code>image</code></td><td><code>image.link</code>, <code>.caption</code>, <code>.mime_type</code></td></tr>
       <tr><td><code>video</code></td><td><code>video.link</code>, <code>.caption</code> — GIFs arrive as video, as they do on WhatsApp</td></tr>
       <tr><td><code>audio</code></td><td><code>audio.link</code>, <code>.voice</code> (true for a voice note)</td></tr>
+      <tr><td><code>document</code></td><td><code>document.id</code>, <code>.filename</code>, <code>.mime_type</code>, <code>.sha256</code>, <code>.file_size</code>, <code>.caption</code> — an <em>id</em>, not a link. See <a href="#documents">Documents</a>.</td></tr>
     </tbody>
   </table>
   <div class="note">
-    <strong>Media links are public and temporary.</strong> Meta gives you a media id to
-    exchange for a URL; this gateway has already downloaded and decrypted the file and
-    gives you <code>link</code> directly — a plain GET, no credentials, so you can hand it
-    to an image or transcription model as-is. Links expire (48 hours by default), so fetch
-    what you need when the event arrives.
+    <strong>Media links are public and temporary.</strong> For images, video and audio,
+    Meta gives you a media id to exchange for a URL; this gateway has already downloaded
+    and decrypted the file and gives you <code>link</code> directly — a plain GET, no
+    credentials, so you can hand it to an image or transcription model as-is. Links expire
+    (48 hours by default), so fetch what you need when the event arrives.
+  </div>
+  <div class="note">
+    <strong>Documents are the exception, and follow Meta exactly.</strong> A document
+    webhook carries <code>document.id</code> and no link, because the file is never
+    downloaded on receipt — it stays on WhatsApp until you ask for it. See
+    <a href="#documents">Documents</a>.
   </div>
 
   <h3>Group membership</h3>
@@ -470,6 +478,104 @@
 </section>
 
 <!-- ------------------------------------------------------------------ -->
+<!-- ------------------------------------------------------------------ -->
+<section id="documents">
+  <h2>Documents</h2>
+  <p>
+    When someone sends a file — a PDF, a spreadsheet, a zip — you get a
+    <code>document</code> message naming it, and nothing else. The bytes stay on
+    WhatsApp until you ask for them. This is exactly Meta's two-step media flow, and it
+    is deliberate: most files posted in a group are never read by a bot, so nothing is
+    downloaded, stored or cached here on the chance that one of them is.
+  </p>
+
+  <h3>1. The webhook tells you a file exists</h3>
+  <pre><code>{ "messages": [ {
+  "from": "12025550100",
+  "id": "wamid.HBgLMTIw…",
+  "timestamp": "1749416383",
+  "type": "document",
+  "document": {
+    "id": "wamid.HBgLMTIw…",
+    "filename": "Q3-report.pdf",
+    "mime_type": "application/pdf",
+    "sha256": "0hs3…",
+    "file_size": 284913,
+    "caption": "the numbers we discussed"
+  }
+} ] }</code></pre>
+  <p>
+    <code>document.id</code> is the media id. Here it is the same string as the message
+    id — Meta's are different strings, and a client should treat both as opaque and pass
+    them back verbatim rather than assuming either way.
+  </p>
+
+  <h3>2. Exchange the id for a URL</h3>
+  <pre><code>curl -H "Authorization: Bearer $TOKEN" \
+  https://wa-gateway.example.com/api/wamid.HBgLMTIw…</code></pre>
+  <pre><code>{
+  "messaging_product": "whatsapp",
+  "url": "https://wa-gateway.example.com/api/documents/wamid.HBgLMTIw…",
+  "mime_type": "application/pdf",
+  "sha256": "0hs3…",
+  "file_size": 284913,
+  "id": "wamid.HBgLMTIw…",
+  "filename": "Q3-report.pdf"
+}</code></pre>
+  <p>
+    <code>filename</code> is the one addition to Meta's answer, which has no idea what
+    the file was called. Everything else is Meta's shape, including the endpoint:
+    <code>GET /&lt;MEDIA_ID&gt;</code> below your base URL.
+  </p>
+
+  <h3>3. Download it</h3>
+  <pre><code>curl -L -H "Authorization: Bearer $TOKEN" \
+  -o Q3-report.pdf \
+  "https://wa-gateway.example.com/api/documents/wamid.HBgLMTIw…"</code></pre>
+  <p>
+    Follow the <code>url</code> from step 2 rather than building it yourself — it is an
+    opaque link on Meta and should be treated as one here. The response is the decrypted
+    file, streamed straight from WhatsApp as you read it; it is never written to disk on
+    the gateway. <code>Content-Type</code> is the document's own, and
+    <code>Content-Disposition</code> carries the filename.
+  </p>
+
+  <div class="note">
+    <strong>Both requests need your bearer token</strong> — unlike image and audio
+    <code>link</code>s, which are unauthenticated so you can hand them to a model that
+    would drop your headers. A document is fetched by your own code, so it is protected
+    properly. Meta requires the token on its media URLs for the same reason.
+  </div>
+
+  <div class="note">
+    <strong>You have about a week.</strong> The pointer this gateway keeps is TTL'd to
+    seven days, after which both requests answer <code>404</code>. WhatsApp itself drops
+    older files off its CDN sooner than that; the gateway asks the sending device to
+    re-upload, which usually works but needs that device to be online. Fetch what you
+    care about when the message arrives.
+  </div>
+
+  <p>
+    A <code>404</code> means the id is unknown, belongs to another number, or has aged
+    out — all the same answer. A <code>503</code> means this number is not connected to
+    WhatsApp at that moment; retry shortly.
+  </p>
+
+  <h3>Sending a document</h3>
+  <p>
+    Outbound is unchanged and does not use media ids — send a link, exactly as under
+    <a href="#send">Sending</a>:
+  </p>
+  <pre><code>{ "messaging_product": "whatsapp",
+  "to": "12025550100",
+  "type": "document",
+  "document": {
+    "link": "https://example.com/Q3-report.pdf",
+    "filename": "Q3-report.pdf",
+    "caption": "the numbers we discussed"
+  } }</code></pre>
+</section>
+
 <section id="status">
   <h2>Status</h2>
   <pre><code><span class="m">GET</span> /health   → 200 always while the service is running
@@ -551,9 +657,14 @@
         <td><code>type: "poll"</code>, with tallies on a webhook</td>
       </tr>
       <tr>
-        <td>Media</td>
+        <td>Images, video, audio</td>
         <td>A media id you exchange for a URL</td>
         <td>A public, temporary <code>link</code>, already decrypted</td>
+      </tr>
+      <tr>
+        <td>Documents</td>
+        <td>A media id you exchange for a URL</td>
+        <td>The same — a media id you exchange for a URL</td>
       </tr>
       <tr>
         <td>Onboarding</td>

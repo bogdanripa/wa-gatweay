@@ -148,11 +148,41 @@ test("ptt audio is voice; non-ptt audio is audio", () => {
 
 test("unsupported types are skipped rather than forwarded empty", () => {
     assert.equal(classify({ stickerMessage: {} }).kind, "skip");
-    assert.equal(classify({ documentMessage: {} }).kind, "skip");
     assert.equal(classify({ reactionMessage: {} }).kind, "skip");
     assert.equal(classify({ protocolMessage: {} }).kind, "skip");
     assert.equal(classify(null).kind, "skip");
     assert.equal(classify(undefined).kind, "skip");
+});
+
+test("a document classifies as metadata only, never as media to download", () => {
+    const cls = classify({
+        documentMessage: {
+            fileName: "invoice.pdf",
+            mimetype: "application/pdf",
+            fileLength: 12345,
+            fileSha256: Buffer.from("abc"),
+            caption: "here you go",
+        },
+    });
+    assert.equal(cls.kind, "document");
+    // The absence of this is what keeps the bytes on WhatsApp: `session.ts` only
+    // downloads when a classification names a mediaKind.
+    assert.equal(cls.mediaKind, undefined);
+    assert.equal(cls.document.filename, "invoice.pdf");
+    assert.equal(cls.document.mimetype, "application/pdf");
+    assert.equal(cls.document.size, 12345);
+    assert.equal(cls.document.sha256, Buffer.from("abc").toString("base64"));
+    assert.equal(cls.caption, "here you go");
+});
+
+test("a captioned document is unwrapped to the document itself", () => {
+    const cls = classify({
+        documentWithCaptionMessage: {
+            message: { documentMessage: { fileName: "notes.txt", mimetype: "text/plain" } },
+        },
+    });
+    assert.equal(cls.kind, "document");
+    assert.equal(cls.document.filename, "notes.txt");
 });
 
 test("ephemeral and view-once wrappers are unwrapped", () => {
@@ -375,6 +405,39 @@ test("a GIF becomes a video, because Meta has no gif type", () => {
         { link: "https://x/g.mp4" }
     );
     assert.equal(event.entry[0].changes[0].value.messages[0].type, "video");
+});
+
+test("an inbound document carries Meta's id, and no link", () => {
+    // Meta's documented shape for an inbound document webhook: the media is
+    // named by an `id` you exchange for a url later, never by a url up front.
+    const event = buildCloudMessageEvent(
+        { key: { id: "wamid.DOC", remoteJid: USER }, messageTimestamp: 1749416383 },
+        {
+            kind: "document",
+            caption: "the report",
+            document: {
+                filename: "q3.pdf",
+                mimetype: "application/pdf",
+                sha256: "c2hh",
+                size: 4096,
+            },
+        },
+        { chatJid: USER, senderJid: USER },
+        CLOUD_META
+    );
+    const msg = event.entry[0].changes[0].value.messages[0];
+    assert.equal(msg.type, "document");
+    assert.deepEqual(msg.document, {
+        id: "wamid.DOC",
+        filename: "q3.pdf",
+        mime_type: "application/pdf",
+        sha256: "c2hh",
+        file_size: 4096,
+        caption: "the report",
+    });
+    // The whole point of the on-demand model: no url anywhere in the payload,
+    // so nothing was downloaded to produce it.
+    assert.equal(msg.document.link, undefined);
 });
 
 test("skipped classifications produce no cloud event either", () => {

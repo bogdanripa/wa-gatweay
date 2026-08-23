@@ -58,13 +58,25 @@ export interface MessageKeyDoc {
     fromMe: boolean;
     participant?: string;
     /**
-     * base64 of the encoded proto.Message, for messages this gateway sent.
+     * base64 of the encoded proto.Message. Kept for two different reasons.
      *
-     * Needed to answer a retry receipt. When a recipient cannot decrypt, it asks
-     * the sender to send again, and Baileys calls `getMessage` for the original
-     * content to re-encrypt. Without it the recipient sits on "Waiting for this
-     * message" forever. Baileys' own retry cache is in memory, so it is empty
-     * after any redeploy — which is exactly when this matters.
+     * For messages this gateway *sent*: to answer a retry receipt. When a
+     * recipient cannot decrypt, it asks the sender to send again, and Baileys
+     * calls `getMessage` for the original content to re-encrypt. Without it the
+     * recipient sits on "Waiting for this message" forever. Baileys' own retry
+     * cache is in memory, so it is empty after any redeploy — which is exactly
+     * when this matters.
+     *
+     * For inbound *documents*: this is the only thing kept about the file, and
+     * it is a pointer, not the bytes — WhatsApp's CDN url, the media key and the
+     * enc-sha needed to fetch and decrypt it later. The gateway deliberately
+     * does not download documents on receipt (see `map.ts`), so without this
+     * there is no way to honour a client's later "give me that file". The
+     * file itself never touches this box unless someone asks for it, and even
+     * then it is streamed straight through.
+     *
+     * The TTL on this collection is therefore also the window in which a
+     * document stays fetchable — a week.
      */
     message?: string;
     createdAt: Date;

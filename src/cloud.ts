@@ -370,6 +370,20 @@ export function buildCloudMessageEvent(
             message.type = "audio";
             message.audio = { link: media?.link, voice: false, mime_type: "audio/ogg" };
             break;
+        case "document":
+            // Meta's shape: an `id`, never a link. The bytes stay on WhatsApp
+            // until someone asks, which is the whole point — a gateway on a
+            // Raspberry Pi should not be quietly warehousing everybody's files.
+            message.type = "document";
+            message.document = {
+                id: message.id,
+                filename: cls.document?.filename,
+                mime_type: cls.document?.mimetype,
+                sha256: cls.document?.sha256,
+                file_size: cls.document?.size,
+                caption: cls.caption,
+            };
+            break;
         case "link_preview":
             // A link preview is a text message with an unfurled card. Meta models
             // it as plain text, so the body is what a client actually gets.

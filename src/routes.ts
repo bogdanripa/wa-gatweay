@@ -86,7 +86,7 @@ export function makeApiRouter(manager: SessionManager): Router {
     // path should 404, not 401. A 401 on an unknown route sends you hunting for a
     // credentials problem that isn't there.
     router.use(
-        ["/groups", "/:phoneNumberId/messages"],
+        ["/groups", "/documents", "/:phoneNumberId/messages"],
         (req: ApiRequest, res: Response, next) => {
             const token = bearerOf(req);
             const session = token ? manager.byTokenOrNull(token) : null;
@@ -129,6 +129,58 @@ export function makeApiRouter(manager: SessionManager): Router {
         }
     });
 
+    // --- media --------------------------------------------------------------
+    //
+    // Documents are never downloaded on receipt. The webhook carries an `id`,
+    // and the bytes stay on WhatsApp until a client asks for them — which is
+    // exactly Meta's model, and the reason this gateway isn't warehousing every
+    // file anybody posts in a group.
+    //
+    // Unlike `/media/:id` (images, voice notes), these two need the bearer
+    // token: a document is fetched by the bot itself, not handed to a model that
+    // would drop our headers, and message ids are far more guessable than the 24
+    // random bytes an unguessable-path scheme relies on.
+
+    /**
+     * The bytes, streamed straight through — nothing is written to disk.
+     *
+     * This is the url the metadata lookup below points at. Meta's equivalent url
+     * is an opaque CDN link that also requires the token, so a client that
+     * follows `url` rather than constructing it works unchanged.
+     */
+    router.get("/documents/:mediaId", async (req: ApiRequest, res) => {
+        try {
+            const found = await sessionOf(req).documentStream(req.params.mediaId);
+            if (!found) {
+                res.status(404).json(
+                    buildCloudError(new CloudRequestError("(#100) Unsupported get request.", 100))
+                );
+                return;
+            }
+            res.setHeader("content-type", found.mimetype);
+            if (found.filename) {
+                // `attachment` and a quoted name: filenames carry spaces and
+                // commas, both of which break the header unquoted.
+                res.setHeader(
+                    "content-disposition",
+                    `attachment; filename="${found.filename.replace(/["\\]/g, "")}"`
+                );
+            }
+            found.stream.on("error", (e) => {
+                logger.error({ e, id: req.params.mediaId }, "document stream failed");
+                // Headers are already out by the time a CDN read fails, so the
+                // only honest signal left is an aborted body.
+                res.destroy();
+            });
+            found.stream.pipe(res);
+        } catch (e) {
+            logger.error({ e, id: req.params.mediaId }, "document fetch failed");
+            res.status(503).json(
+                buildCloudError(e instanceof Error ? e : new Error(String(e)))
+            );
+        }
+    });
+
     // --- WhatsApp Cloud API compatible ---------------------------------------
     //
     // `POST /<PHONE_NUMBER_ID>/messages`, Meta's shape. The path segment is
@@ -165,6 +217,62 @@ export function makeApiRouter(manager: SessionManager): Router {
             }
             logger.error({ e }, "cloud send failed");
             res.status(502).json(buildCloudError(e instanceof Error ? e : new Error(String(e))));
+        }
+    });
+
+    /**
+     * `GET /<MEDIA_ID>` — Meta's media metadata lookup, verbatim.
+     *
+     * Registered last on purpose: it claims the whole single-segment GET space
+     * below the base url, which is where Meta puts it. Everything real above it
+     * has already matched, so what reaches here is either a media id or a typo.
+     *
+     * The auth check is inline rather than in the middleware above because this
+     * path is also every mistyped one-segment path in the gateway, and a 401
+     * there sends people hunting for a credentials problem that isn't there. So
+     * a request with no credentials at all is treated as the typo it almost
+     * always is and answered 404, exactly as an unknown media id would be; only
+     * a bearer token that is actually present and wrong gets a 401, because that
+     * one *is* a credentials problem and saying so saves the guessing.
+     */
+    router.get("/:mediaId", async (req: ApiRequest, res) => {
+        const token = bearerOf(req);
+        if (!token) {
+            res.status(404).json(
+                buildCloudError(new CloudRequestError("(#100) Unsupported get request.", 100))
+            );
+            return;
+        }
+        const session = manager.byTokenOrNull(token);
+        if (!session) {
+            res.status(401).json({ error: { message: "unauthorized" } });
+            return;
+        }
+        try {
+            const meta = await session.documentMetadata(req.params.mediaId);
+            if (!meta) {
+                // Unknown id, another session's id, and one that has aged out of
+                // the week the pointer lives are all the same answer — they are
+                // indistinguishable to a client and should be.
+                res.status(404).json(
+                    buildCloudError(new CloudRequestError("(#100) Unsupported get request.", 100))
+                );
+                return;
+            }
+            res.json({
+                messaging_product: "whatsapp",
+                url: `${config.publicUrl}${API_PREFIX}/documents/${req.params.mediaId}`,
+                mime_type: meta.mimetype,
+                sha256: meta.sha256,
+                file_size: meta.size,
+                id: req.params.mediaId,
+                // Not in Meta's answer, which has no idea what the file was
+                // called. Additive, and the one thing a client would otherwise
+                // have to keep from the webhook just to name a download.
+                filename: meta.filename,
+            });
+        } catch (e) {
+            fail(res, e);
         }
     });
 

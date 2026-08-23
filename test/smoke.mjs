@@ -470,6 +470,42 @@ try {
     const nope = await fetch(`${base}/does-not-exist`);
     check("unknown route is a clean 404", nope.status === 404, `status=${nope.status}`);
 
+    // --- documents ----------------------------------------------------------
+    //
+    // The bytes are never fetched here — nothing is paired, so there is nothing
+    // to fetch. What these prove is that the two endpoints exist, are guarded,
+    // and don't leak the difference between "no such id" and "not yours".
+
+    const docMetaNoAuth = await fetch(`${base}/wamid.NOPE`, {
+        headers: { authorization: "Bearer definitely-not-a-token" },
+    });
+    check(
+        "a media lookup with a wrong token is a 401",
+        docMetaNoAuth.status === 401,
+        `status=${docMetaNoAuth.status}`
+    );
+
+    const docMetaUnknown = await fetch(`${base}/wamid.NOPE`, { headers: authOf(tokenA) });
+    check(
+        "an unknown media id is a 404, not a 500",
+        docMetaUnknown.status === 404,
+        `status=${docMetaUnknown.status}`
+    );
+
+    const docBytesNoAuth = await fetch(`${base}/documents/wamid.NOPE`);
+    check(
+        "downloading a document without a token is a 401",
+        docBytesNoAuth.status === 401,
+        `status=${docBytesNoAuth.status}`
+    );
+
+    const docBytesUnknown = await fetch(`${base}/documents/wamid.NOPE`, { headers: authOf(tokenA) });
+    check(
+        "downloading an unknown document is a 404",
+        docBytesUnknown.status === 404,
+        `status=${docBytesUnknown.status}`
+    );
+
     check("no webhook fired while unpaired", hits.a === 0 && hits.b === 0, `a=${hits.a} b=${hits.b}`);
 } finally {
     child.kill("SIGTERM");

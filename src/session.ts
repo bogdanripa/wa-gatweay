@@ -1,5 +1,6 @@
 import makeWASocket, {
     decryptPollVote,
+    downloadMediaMessage,
     DisconnectReason,
     jidNormalizedUser,
     makeCacheableSignalKeyStore,
@@ -9,6 +10,7 @@ import makeWASocket, {
     type WASocket,
 } from "baileys";
 import { createHash } from "node:crypto";
+import type { Readable } from "node:stream";
 import { Boom } from "@hapi/boom";
 import { config, type SessionConfig } from "./config.js";
 import { logger, baileysLogger } from "./log.js";
@@ -552,8 +554,10 @@ export class Session {
             : chatJid;
 
         // Remember the key so "act on this id" calls (mark read, react) can
-        // reconstruct it later — the API only ever passes the bare id.
-        await this.rememberKey(msg);
+        // reconstruct it later — the API only ever passes the bare id. For a
+        // document the body comes too, because the file is fetched on demand
+        // and the body is what says where from.
+        await this.rememberKey(msg, cls.kind === "document");
 
         let chatName: string | undefined;
         if (isGroup) {
@@ -1282,7 +1286,7 @@ export class Session {
      * the full key — remoteJid, fromMe and participant. So every message we see or
      * send gets its key stored, scoped to this session and TTL'd to a week.
      */
-    private async rememberKey(msg: WAMessage) {
+    private async rememberKey(msg: WAMessage, keepBody = false) {
         const k = msg.key;
         if (!k?.id || !k.remoteJid) return;
         try {
@@ -1295,10 +1299,13 @@ export class Session {
                         remoteJid: k.remoteJid,
                         fromMe: !!k.fromMe,
                         participant: k.participant || undefined,
-                        // Only our own messages, and only their content: a retry
-                        // receipt asks us to re-send something WE sent, so an
-                        // inbound message's body would be stored for nothing.
-                        ...(k.fromMe && msg.message
+                        // Our own messages, because a retry receipt asks us to
+                        // re-send something WE sent — an inbound body would
+                        // otherwise be stored for nothing. The exception is an
+                        // inbound document, where the body is the only handle on
+                        // a file we deliberately did not download: url, mediaKey
+                        // and enc-sha, no bytes. See MessageKeyDoc.message.
+                        ...((k.fromMe || keepBody) && msg.message
                             ? {
                                   message: Buffer.from(
                                       proto.Message.encode(msg.message).finish()
@@ -1352,6 +1359,115 @@ export class Session {
             "a retry asked for a message we no longer hold — the recipient will keep waiting"
         );
         return undefined;
+    }
+
+    // ----------------------------------------------------------------- documents
+
+    /**
+     * Inbound documents are fetched on demand, never on receipt.
+     *
+     * This is Meta's own model — a webhook hands you a media id, and you call
+     * `GET /<MEDIA_ID>` if and when you want the file — and it is the only sane
+     * one here: most files posted in a group are never read by any bot, so
+     * downloading them all means warehousing everybody's documents on a
+     * Raspberry Pi for the few that matter. What is kept is the pointer
+     * (WhatsApp's url, the media key, the enc-sha), which is what `rememberKey`
+     * stores for a document and nothing else.
+     *
+     * Null for anything that is not a document this session received: an
+     * unknown id, another session's id (ids are scoped), or one whose key has
+     * aged out of the week-long TTL. The caller turns all three into a 404 —
+     * they are indistinguishable to a client and should be.
+     */
+    private async documentOf(
+        mediaId: string
+    ): Promise<{ msg: WAMessage; doc: proto.Message.IDocumentMessage } | null> {
+        const rec = await this.stores.messageKeys
+            .findOne({ _id: scopedId(this.id, mediaId) })
+            .catch((e) => {
+                this.log.warn({ e, id: mediaId }, "could not read stored message key");
+                return null;
+            });
+        if (!rec?.message) return null;
+
+        let message: proto.IMessage;
+        try {
+            message = proto.Message.decode(Buffer.from(rec.message, "base64"));
+        } catch (e) {
+            this.log.warn({ e, id: mediaId }, "stored message body would not decode");
+            return null;
+        }
+
+        const doc = unwrap(message)?.documentMessage;
+        if (!doc) return null;
+
+        return {
+            msg: {
+                key: {
+                    id: rec.messageId,
+                    remoteJid: rec.remoteJid,
+                    fromMe: rec.fromMe,
+                    participant: rec.participant,
+                },
+                message,
+            } as WAMessage,
+            doc,
+        };
+    }
+
+    /** Meta's media-metadata answer, for a document this session received. */
+    async documentMetadata(mediaId: string) {
+        const found = await this.documentOf(mediaId);
+        if (!found) return null;
+        const d = found.doc;
+        return {
+            mimetype: d.mimetype || "application/octet-stream",
+            filename: d.fileName || undefined,
+            // base64, matching what the webhook already reported for this file —
+            // a client can compare the two without re-encoding either.
+            sha256: d.fileSha256 ? Buffer.from(d.fileSha256).toString("base64") : undefined,
+            size: d.fileLength ? Number(d.fileLength) : undefined,
+        };
+    }
+
+    /**
+     * The document's bytes, as a stream.
+     *
+     * Nothing is written to disk on the way through — this is WhatsApp's own
+     * blob, decrypted in flight and piped at the client. "Don't store anything"
+     * is the point, so don't quietly add a cache here.
+     */
+    async documentStream(
+        mediaId: string
+    ): Promise<{ stream: Readable; mimetype: string; filename?: string } | null> {
+        const found = await this.documentOf(mediaId);
+        if (!found) return null;
+
+        const sock = this.sock;
+        if (!sock) {
+            // Fetching needs a live socket for the re-upload path below, and a
+            // reconnect is usually seconds away — 503 is the honest answer.
+            throw new Error("this number is not connected to WhatsApp right now");
+        }
+
+        const stream = (await downloadMediaMessage(
+            found.msg,
+            "stream",
+            {},
+            {
+                logger: baileysLogger,
+                // WhatsApp's CDN drops older media; this asks the sending device
+                // to put it back. Without it anything more than a few days old
+                // fails here, which is well inside the week the pointer lives.
+                reuploadRequest: sock.updateMediaMessage,
+            }
+        )) as unknown as Readable;
+
+        return {
+            stream,
+            mimetype: found.doc.mimetype || "application/octet-stream",
+            filename: found.doc.fileName || undefined,
+        };
     }
 
     // -------------------------------------------------------------------- state
