@@ -53,7 +53,7 @@ export function buildCloudError(e: CloudRequestError | Error) {
 }
 
 export type CloudSendKind =
-    | { type: "text"; body: string; previewUrl: boolean }
+    | { type: "text"; body: string; previewUrl: boolean; mentions?: string[] }
     | { type: "image"; media: string; caption?: string }
     | { type: "audio"; media: string }
     | { type: "video"; media: string; caption?: string }
@@ -90,6 +90,31 @@ function mediaRef(o: any, type: string): string {
  * clear "expected whatsapp" beats a silent success when someone points a
  * half-configured client at this.
  */
+/**
+ * Outbound @-mentions — an extension, since Meta's Cloud API has none.
+ *
+ * `mentions` is a top-level array on a text send, mirroring the inbound
+ * `mentions[]` on a received message: each entry is a phone number, either as a
+ * bare string or as `{ phone }`, and every `@<digits>` in the body naming one of
+ * them renders as a real, tappable tag. Only ids WhatsApp is handed here become
+ * tags — the body is never pattern-matched, so a number somebody typed is not
+ * turned into a mention by accident.
+ *
+ * Tolerant on purpose: a consumer that never sends the field, or sends an empty
+ * one, gets exactly the behaviour it had before the field existed — including
+ * the parsed shape, which is why the key is absent rather than empty.
+ */
+function parseMentions(raw: any): string[] {
+    if (!Array.isArray(raw)) return [];
+    const out: string[] = [];
+    for (const entry of raw) {
+        const value = typeof entry === "string" || typeof entry === "number" ? entry : entry?.phone ?? entry?.wa_id;
+        const digits = String(value ?? "").replace(/\D/g, "");
+        if (digits && !out.includes(digits)) out.push(digits);
+    }
+    return out;
+}
+
 export function parseCloudSendRequest(body: any): CloudSendRequest {
     if (!body || typeof body !== "object") {
         throw new CloudRequestError("(#100) Invalid parameter", 100, "Body must be a JSON object.");
@@ -148,7 +173,17 @@ export function parseCloudSendRequest(body: any): CloudSendRequest {
                 );
             }
             // preview_url defaults to false in Meta's API.
-            return { to, recipientType, kind: { type: "text", body: text, previewUrl: !!content?.preview_url } };
+            const mentions = parseMentions(body.mentions ?? content?.mentions);
+            return {
+                to,
+                recipientType,
+                kind: {
+                    type: "text",
+                    body: text,
+                    previewUrl: !!content?.preview_url,
+                    ...(mentions.length ? { mentions } : {}),
+                },
+            };
         }
         case "image":
             return { to, recipientType, kind: { type: "image", media: mediaRef(content, "image"), caption: content?.caption } };

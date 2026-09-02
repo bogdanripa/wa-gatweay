@@ -109,6 +109,25 @@
   "to": "12025550100", "type": "text",
   "text": { "preview_url": false, "body": "Hello" } }</code></pre>
 
+  <h4>Tagging people</h4>
+  <p>
+    <strong>An extension — Meta has no outbound mention.</strong> Add a top-level
+    <code>mentions</code> array of phone numbers, and write each one into the body as
+    <code>@&lt;digits&gt;</code>; WhatsApp renders it as a real, tappable tag showing the
+    person's name. It mirrors the inbound <code>mentions[]</code> on a received message.
+    A number in the body that is not in the array stays plain text, and the array
+    without a matching <code>@</code> in the body tags nobody — the two must agree.
+  </p>
+  <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
+  "to": "120363012345678901@g.us", "type": "text",
+  "text": { "body": "@12025550100 what did you mean?" },
+  "mentions": ["12025550100"] }</code></pre>
+  <p>
+    Entries may also be objects with a <code>phone</code> field. In a LID-addressed group
+    the gateway declares the person's LID beside the number where it knows one, so the
+    tag renders either way.
+  </p>
+
   <h3>To a group</h3>
   <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
   "to": "120363000000000000@g.us", "type": "text",

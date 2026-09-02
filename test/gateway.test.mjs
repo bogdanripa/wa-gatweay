@@ -877,3 +877,35 @@ test("an unresolved mention is never rewritten into a fake number", () => {
         "@99887766554433 hi"
     );
 });
+
+// ---------------------------------------------------------------------- outbound mentions
+
+// An extension: Meta has no outbound mention, so this shape is ours. What the
+// tests pin down is the tolerance — a consumer that never sends the field is
+// unaffected — and that only the declared numbers, never the body, decide who
+// is tagged.
+
+test("a text send without mentions parses exactly as before", () => {
+    const req = parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "@12025550100 hi" } });
+    // The key is absent, not empty: the parsed shape is byte-for-byte what it was.
+    assert.deepEqual(req.kind, { type: "text", body: "@12025550100 hi", previewUrl: false });
+});
+
+test("mentions are read from the top level as phone numbers, digits only", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp", to: "120363012345678901@g.us", recipient_type: "group", type: "text",
+        text: { body: "@12025550100 what did you mean?" },
+        mentions: ["+1 (202) 555-0100", { phone: "12025550101" }, { wa_id: "12025550102" }, "12025550100", "", null],
+    });
+    assert.deepEqual(req.kind.mentions, ["12025550100", "12025550101", "12025550102"]);
+});
+
+test("mentions nested under text are accepted too", () => {
+    const req = parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "x", mentions: ["12025550100"] } });
+    assert.deepEqual(req.kind.mentions, ["12025550100"]);
+});
+
+test("a malformed mentions field tags nobody rather than failing the send", () => {
+    assert.equal(parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "x" }, mentions: "12025550100" }).kind.mentions, undefined);
+    assert.equal(parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "x" }, mentions: [{}] }).kind.mentions, undefined);
+});

@@ -1127,7 +1127,7 @@ export class Session {
 
         switch (k.type) {
             case "text": {
-                const sent = await this.sendText(req.to, k.body);
+                const sent = await this.sendText(req.to, k.body, k.mentions);
                 return { messageId: sent.id, waId };
             }
             case "image": {
@@ -1180,15 +1180,40 @@ export class Session {
         return { id: sent?.key?.id || undefined };
     }
 
-    async sendText(to: string, body: string): Promise<{ id?: string }> {
+    async sendText(to: string, body: string, mentions: string[] = []): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
         const jid = toWaJid(to);
         if (!jid) throw new Error(`unroutable recipient: ${to}`);
-        const sent = await sock.sendMessage(jid, { text: body });
+        const mentionedJid = await this.mentionJids(mentions);
+        const sent = await sock.sendMessage(jid, mentionedJid.length ? { text: body, mentions: mentionedJid } : { text: body });
         this.lastSentAt = new Date();
         if (sent) await this.rememberKey(sent);
         return { id: sent?.key?.id || undefined };
+    }
+
+    /**
+     * The JIDs to declare for an outbound mention list.
+     *
+     * A tag renders when the `@<user>` in the text matches a JID in
+     * `contextInfo.mentionedJid`. The consumer writes phone numbers into the
+     * body, so the phone-number JID is what must be declared; in a LID-addressed
+     * group the client may only know the person by LID, so where the mapping
+     * store has one, that form is declared beside it. Declaring both is
+     * harmless — an unmatched entry is simply ignored — and it is the same
+     * "carry both ids" rule the inbound side follows.
+     */
+    private async mentionJids(mentions: string[]): Promise<string[]> {
+        const out: string[] = [];
+        for (const raw of mentions || []) {
+            const digits = String(raw ?? "").replace(/\D/g, "");
+            if (!digits) continue;
+            const pnJid = `${digits}@s.whatsapp.net`;
+            if (!out.includes(pnJid)) out.push(pnJid);
+            const lid = await this.lidFor(pnJid);
+            if (lid && !out.includes(`${lid}@lid`)) out.push(`${lid}@lid`);
+        }
+        return out;
     }
 
     async sendImage(to: string, media: string, caption?: string): Promise<{ id?: string }> {
