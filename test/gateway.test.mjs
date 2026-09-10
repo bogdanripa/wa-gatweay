@@ -279,6 +279,40 @@ test("recipient_type group is carried through", () => {
     assert.equal(req.recipientType, "group");
 });
 
+test("a reply carries Meta's context.message_id through as replyTo", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        recipient_type: "group",
+        to: GROUP,
+        type: "text",
+        context: { message_id: "3EB0AAAA" },
+        text: { body: "this one, please" },
+    });
+    assert.equal(req.replyTo, "3EB0AAAA");
+    assert.equal(req.kind.type, "text");
+});
+
+test("the inbound field name, context.id, is accepted for a reply too", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        to: "12025550100",
+        type: "image",
+        context: { id: "3EB0BBBB" },
+        image: { link: "https://example.com/a.jpg" },
+    });
+    assert.equal(req.replyTo, "3EB0BBBB");
+});
+
+test("no context means no replyTo, so a plain send is byte-identical to before", () => {
+    const req = parseCloudSendRequest({
+        messaging_product: "whatsapp",
+        to: "12025550100",
+        type: "text",
+        text: { body: "hi" },
+    });
+    assert.equal("replyTo" in req, false);
+});
+
 test("a wrong messaging_product is refused, as Meta refuses it", () => {
     assert.throws(
         () => parseCloudSendRequest({ to: "1", type: "text", text: { body: "x" } }),

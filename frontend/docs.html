@@ -132,6 +132,24 @@
   <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
   "to": "120363000000000000@g.us", "type": "text",
   "text": { "body": "Hello everyone" } }</code></pre>
+
+  <h3>Replying to a message</h3>
+  <p>
+    Meta's shape: a <code>context</code> object naming the message to quote. WhatsApp
+    shows it as a reply, with the quoted photo, document or text above yours — in a
+    group, that is how a bot says <em>which</em> photo it means. Works on every message
+    type, not just text.
+  </p>
+  <pre><code>{ "messaging_product": "whatsapp", "recipient_type": "group",
+  "to": "120363000000000000@g.us", "type": "text",
+  "context": { "message_id": "3EB0AAAA…" },
+  "text": { "body": "This one is not readable, please send it again" } }</code></pre>
+  <p class="muted">
+    The id is the one the inbound event carried (<code>messages[].id</code>), or the id a
+    send returned. <code>context.id</code> is accepted too, mirroring the inbound field.
+    The gateway keeps message content for a week; a reply to something older still points
+    at the right message, only without the preview.
+  </p>
   <p class="muted">
     Any group the linked number belongs to. Meta's Groups API only addresses groups the
     business itself created — see <a href="#differences">differences</a>.

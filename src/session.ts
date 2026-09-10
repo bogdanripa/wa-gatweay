@@ -557,7 +557,10 @@ export class Session {
         // reconstruct it later — the API only ever passes the bare id. For a
         // document the body comes too, because the file is fetched on demand
         // and the body is what says where from.
-        await this.rememberKey(msg, cls.kind === "document");
+        // Every inbound body is kept, not just documents: a bot that replies to a
+        // photo needs the photo's message content for WhatsApp to render the
+        // quote (thumbnail, caption), and the key alone cannot give that.
+        await this.rememberKey(msg, true);
 
         let chatName: string | undefined;
         if (isGroup) {
@@ -1127,11 +1130,11 @@ export class Session {
 
         switch (k.type) {
             case "text": {
-                const sent = await this.sendText(req.to, k.body, k.mentions);
+                const sent = await this.sendText(req.to, k.body, k.mentions, req.replyTo);
                 return { messageId: sent.id, waId };
             }
             case "image": {
-                const sent = await this.sendImage(req.to, k.media, k.caption);
+                const sent = await this.sendImage(req.to, k.media, k.caption, req.replyTo);
                 return { messageId: sent.id, waId };
             }
             case "reaction": {
@@ -1147,7 +1150,7 @@ export class Session {
             case "document":
             case "sticker":
             case "location": {
-                const sent = await this.sendCloudMedia(jid, k);
+                const sent = await this.sendCloudMedia(jid, k, req.replyTo);
                 return { messageId: sent.id, waId };
             }
         }
@@ -1156,7 +1159,8 @@ export class Session {
     /** The media and location kinds with no per-verb route of their own. */
     private async sendCloudMedia(
         jid: string,
-        k: Extract<CloudSendKind, { type: "audio" | "video" | "document" | "sticker" | "location" }>
+        k: Extract<CloudSendKind, { type: "audio" | "video" | "document" | "sticker" | "location" }>,
+        replyTo?: string
     ): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
@@ -1174,22 +1178,58 @@ export class Session {
             else content = { document: media, caption: k.caption, fileName: k.filename || "file" };
         }
 
-        const sent = await sock.sendMessage(jid, content as any);
+        const sent = await sock.sendMessage(jid, content as any, await this.quoteOptions(replyTo));
         this.lastSentAt = new Date();
         if (sent) await this.rememberKey(sent);
         return { id: sent?.key?.id || undefined };
     }
 
-    async sendText(to: string, body: string, mentions: string[] = []): Promise<{ id?: string }> {
+    async sendText(to: string, body: string, mentions: string[] = [], replyTo?: string): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
         const jid = toWaJid(to);
         if (!jid) throw new Error(`unroutable recipient: ${to}`);
         const mentionedJid = await this.mentionJids(mentions);
-        const sent = await sock.sendMessage(jid, mentionedJid.length ? { text: body, mentions: mentionedJid } : { text: body });
+        const sent = await sock.sendMessage(
+            jid,
+            mentionedJid.length ? { text: body, mentions: mentionedJid } : { text: body },
+            await this.quoteOptions(replyTo)
+        );
         this.lastSentAt = new Date();
         if (sent) await this.rememberKey(sent);
         return { id: sent?.key?.id || undefined };
+    }
+
+    /**
+     * Baileys' send options for a reply: the quoted message's full key plus its
+     * content, both from the key store. The content is what WhatsApp shows in
+     * the quote box; when it has expired (a week) the quote still points at the
+     * right message, WhatsApp just shows it without a preview. An unknown id is
+     * logged and the message goes out unquoted rather than not at all.
+     */
+    private async quoteOptions(replyTo?: string): Promise<{ quoted?: WAMessage }> {
+        if (!replyTo) return {};
+        const doc = await this.stores.messageKeys
+            .findOne({ _id: scopedId(this.id, replyTo) })
+            .catch(() => null);
+        if (!doc) {
+            this.log.warn({ replyTo }, "reply to a message this gateway never saw — sent without a quote");
+            return {};
+        }
+        const message = doc.message
+            ? proto.Message.decode(Buffer.from(doc.message, "base64"))
+            : { conversation: "" };
+        return {
+            quoted: {
+                key: {
+                    id: doc.messageId,
+                    remoteJid: doc.remoteJid,
+                    fromMe: doc.fromMe,
+                    participant: doc.participant,
+                },
+                message,
+            } as WAMessage,
+        };
     }
 
     /**
@@ -1216,7 +1256,7 @@ export class Session {
         return out;
     }
 
-    async sendImage(to: string, media: string, caption?: string): Promise<{ id?: string }> {
+    async sendImage(to: string, media: string, caption?: string, replyTo?: string): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
         const jid = toWaJid(to);
@@ -1232,7 +1272,7 @@ export class Session {
             image = Buffer.from(base64, "base64");
         }
 
-        const sent = await sock.sendMessage(jid, { image, caption: caption || undefined } as any);
+        const sent = await sock.sendMessage(jid, { image, caption: caption || undefined } as any, await this.quoteOptions(replyTo));
         if (sent) await this.rememberKey(sent);
         return { id: sent?.key?.id || undefined };
     }

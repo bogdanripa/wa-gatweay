@@ -68,6 +68,11 @@ export interface CloudSendRequest {
     to: string;
     recipientType: "individual" | "group";
     kind: CloudSendKind;
+    /**
+     * The id of the message this one replies to — Meta's `context.message_id`.
+     * WhatsApp renders it as a quote above the message, on any message type.
+     */
+    replyTo?: string;
 }
 
 /** `id` or `link` — Meta accepts either; only `link` means anything here. */
@@ -119,7 +124,16 @@ export function parseCloudSendRequest(body: any): CloudSendRequest {
     if (!body || typeof body !== "object") {
         throw new CloudRequestError("(#100) Invalid parameter", 100, "Body must be a JSON object.");
     }
+    const req = parseCloudSendBody(body);
+    // A reply, in Meta's shape: `context: { message_id }`. `context.id` is taken
+    // too, because that is the field the inbound event carries and a bot that
+    // echoes what it received back is the obvious client.
+    const ctx = body.context;
+    const replyTo = ctx && typeof ctx === "object" ? String(ctx.message_id ?? ctx.id ?? "").trim() : "";
+    return replyTo ? { ...req, replyTo } : req;
+}
 
+function parseCloudSendBody(body: any): CloudSendRequest {
     if (body.messaging_product !== "whatsapp") {
         throw new CloudRequestError(
             "(#100) Missing or invalid parameter: messaging_product",
