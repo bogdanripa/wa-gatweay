@@ -492,6 +492,23 @@ test("group participant events use Meta's group_participants_update field", () =
     assert.deepEqual(group.participants, [
         { wa_id: "12025550100", lid: null, name: "Alex Doe" },
     ]);
+    // No change given → none claimed. A consumer must not mistake "no
+    // information" for "nothing happened".
+    assert.equal("change" in group, false);
+});
+
+test("group events say what changed and to whom", () => {
+    const group = buildCloudGroupEvent(
+        GROUP,
+        "Team",
+        [{ id: USER, name: "Alex Doe" }],
+        CLOUD_META,
+        { action: "add", participants: [USER] }
+    ).entry[0].changes[0].value.groups[0];
+    assert.deepEqual(group.change, { action: "add", participants: [{ wa_id: "12025550100" }] });
+    const upsert = buildCloudGroupEvent(GROUP, "Team", [], CLOUD_META, { action: "upsert", participants: [] })
+        .entry[0].changes[0].value.groups[0];
+    assert.deepEqual(upsert.change, { action: "upsert", participants: [] });
 });
 
 /**

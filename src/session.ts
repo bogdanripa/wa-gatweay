@@ -28,6 +28,7 @@ import {
 import {
     buildCloudContactsEvent,
     buildCloudGroupEvent,
+    type GroupChange,
     buildCloudMessageEvent,
     buildCloudPollVoteEvent,
     CloudRequestError,
@@ -964,7 +965,7 @@ export class Session {
         // Free metadata — this event already carries everything a fetch would
         // return, so caching it here spares a rate-limited round trip later.
         for (const g of groups) this.cacheGroup(g);
-        for (const g of groups) await this.emitGroupEvent(g.id, g);
+        for (const g of groups) await this.emitGroupEvent(g.id, g, { action: "upsert", participants: [] });
     }
 
     private async onGroupsUpdate(groups: Partial<GroupMetadata>[]) {
@@ -975,13 +976,24 @@ export class Session {
             // the entry and hoping the refetch succeeds.
             if (g.subject) this.cacheGroup({ ...this.groupCache.get(g.id)?.meta, ...g });
             else this.groupCache.delete(g.id);
-            await this.emitGroupEvent(g.id);
+            await this.emitGroupEvent(g.id, undefined, { action: "update", participants: [] });
         }
     }
 
     private async onParticipants(u: { id: string; participants: any[]; action: string }) {
         this.groupCache.delete(u.id);
-        await this.emitGroupEvent(u.id);
+        // Who was added/removed/promoted. Baileys hands these over as JIDs or,
+        // in v7, as objects carrying the LID and phone-number forms side by
+        // side; either way the consumer gets numbers, resolved like a sender's.
+        const affected: string[] = [];
+        for (const p of u.participants || []) {
+            const jid = typeof p === "string" ? p : String(p?.id || "");
+            const alt = typeof p === "string" ? undefined : p?.phoneNumber;
+            if (!jid) continue;
+            const pn = await this.resolveParticipant(jid, u.id, "a participant change");
+            affected.push(pn || (alt ? String(alt) : jid));
+        }
+        await this.emitGroupEvent(u.id, undefined, { action: String(u.action || ""), participants: affected });
     }
 
     /**
@@ -989,12 +1001,12 @@ export class Session {
      * GET /groups/:id anyway, so this event only needs to carry enough for them to
      * identify the group and decide whether to greet.
      */
-    private async emitGroupEvent(jid: string, known?: GroupMetadata) {
+    private async emitGroupEvent(jid: string, known?: GroupMetadata, change?: GroupChange) {
         try {
             const meta = known || (await this.getGroupMetadata(jid));
             const participants = await this.groupParticipantIds(meta);
             await this.webhook.send(
-                buildCloudGroupEvent(jid, meta.subject, participants, this.cloudMeta())
+                buildCloudGroupEvent(jid, meta.subject, participants, this.cloudMeta(), change)
             );
         } catch (e) {
             this.log.error({ e, jid }, "failed to emit group event");

@@ -458,7 +458,8 @@ export function buildCloudGroupEvent(
     groupJid: string,
     subject: string,
     participants: Array<{ id: string; lid?: string | null; name?: string }>,
-    meta: CloudMetadata
+    meta: CloudMetadata,
+    change?: GroupChange
 ): Record<string, any> {
     return envelope(meta, "group_participants_update", {
         groups: [
@@ -466,15 +467,34 @@ export function buildCloudGroupEvent(
                 group_id: toChatId(groupJid),
                 subject,
                 participants: participants.map((p) => ({
-                wa_id: toUserId(p.id),
-                // Kept beside the number for the same reason mentions carry it.
-                lid: p.lid ?? null,
-                name: p.name,
-            })),
+                    wa_id: toUserId(p.id),
+                    // Kept beside the number for the same reason mentions carry it.
+                    lid: p.lid ?? null,
+                    name: p.name,
+                })),
+                // What actually happened, beside the resulting roster. Without
+                // it a consumer cannot tell "I was just added" from "someone
+                // else joined" or "the subject changed" — and greets on all three.
+                ...(change
+                    ? {
+                          change: {
+                              action: change.action,
+                              participants: change.participants.map((id) => ({ wa_id: toUserId(id) })),
+                          },
+                      }
+                    : {}),
             },
         ],
     });
 }
+
+/**
+ * Why a group event is being sent. `action` is Baileys' own for a membership
+ * change (`add`, `remove`, `promote`, `demote`, with the affected members), or
+ * `upsert` (a group newly visible to this account — usually the account being
+ * added) or `update` (subject, description or settings) with no members.
+ */
+export type GroupChange = { action: string; participants: string[] };
 
 /** Contact profile names, as Meta delivers them on a `contacts` change. */
 export function buildCloudContactsEvent(

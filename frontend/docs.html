@@ -440,8 +440,17 @@
   "value": { …, "groups": [ {
     "group_id": "120363000000000000@g.us",
     "subject": "Team lunch",
-    "participants": [ { "wa_id": "12025550100", "name": "Alex Doe" } ]
+    "participants": [ { "wa_id": "12025550100", "name": "Alex Doe" } ],
+    "change": { "action": "add", "participants": [ { "wa_id": "12025550100" } ] }
   } ] } }</code></pre>
+  <p class="muted">
+    <code>participants</code> is the whole roster after the change. <code>change</code>
+    says what happened: <code>add</code>, <code>remove</code>, <code>promote</code> or
+    <code>demote</code> with the members concerned; <code>upsert</code> for a group newly
+    visible to the linked number (typically the number being added to it); <code>update</code>
+    for a subject, description or settings change. Check for your own number under an
+    <code>add</code> before treating an event as "I was just added".
+  </p>
 
   <h3>Contacts</h3>
   <pre><code>{ "field": "contacts",
