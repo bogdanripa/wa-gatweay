@@ -509,6 +509,17 @@ test("group events say what changed and to whom", () => {
     const upsert = buildCloudGroupEvent(GROUP, "Team", [], CLOUD_META, { action: "upsert", participants: [] })
         .entry[0].changes[0].value.groups[0];
     assert.deepEqual(upsert.change, { action: "upsert", participants: [] });
+    // The linked number being the one removed is distinct from anyone else
+    // leaving — a consumer needs to stop expecting replies there, not just
+    // update a roster.
+    const removedSelf = buildCloudGroupEvent(GROUP, "Team", [], CLOUD_META, {
+        action: "remove_self",
+        participants: [USER],
+    }).entry[0].changes[0].value.groups[0];
+    assert.deepEqual(removedSelf.change, {
+        action: "remove_self",
+        participants: [{ wa_id: "12025550100" }],
+    });
 });
 
 /**

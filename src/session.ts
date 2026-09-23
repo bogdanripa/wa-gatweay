@@ -981,19 +981,43 @@ export class Session {
     }
 
     private async onParticipants(u: { id: string; participants: any[]; action: string }) {
+        const cached = this.groupCache.get(u.id);
         this.groupCache.delete(u.id);
         // Who was added/removed/promoted. Baileys hands these over as JIDs or,
         // in v7, as objects carrying the LID and phone-number forms side by
         // side; either way the consumer gets numbers, resolved like a sender's.
+        const myPn = digitsOf(this.sock?.user?.id || "");
+        const myLid = digitsOf(this.sock?.user?.lid || "");
+        let selfRemoved = false;
         const affected: string[] = [];
         for (const p of u.participants || []) {
             const jid = typeof p === "string" ? p : String(p?.id || "");
             const alt = typeof p === "string" ? undefined : p?.phoneNumber;
             if (!jid) continue;
+            if (
+                u.action === "remove" &&
+                ((myPn && digitsOf(jid) === myPn) ||
+                    (myLid && digitsOf(jid) === myLid) ||
+                    (alt && myPn && digitsOf(String(alt)) === myPn))
+            ) {
+                selfRemoved = true;
+            }
             const pn = await this.resolveParticipant(jid, u.id, "a participant change");
             affected.push(pn || (alt ? String(alt) : jid));
         }
-        await this.emitGroupEvent(u.id, undefined, { action: String(u.action || ""), participants: affected });
+        // Once we're the one removed, a live metadata fetch is no longer
+        // authorized and throws — which used to lose the event entirely,
+        // exactly when a consumer most needs to hear about it. Fall back to
+        // the roster we had a moment ago (or, failing that, a bare stub) so
+        // the webhook still goes out instead of dying in emitGroupEvent's
+        // catch.
+        const known = selfRemoved
+            ? (cached?.meta ?? { id: u.id, owner: undefined, subject: "", participants: [] })
+            : undefined;
+        await this.emitGroupEvent(u.id, known, {
+            action: selfRemoved ? "remove_self" : String(u.action || ""),
+            participants: affected,
+        });
     }
 
     /**

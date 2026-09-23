@@ -493,6 +493,12 @@ export function buildCloudGroupEvent(
  * change (`add`, `remove`, `promote`, `demote`, with the affected members), or
  * `upsert` (a group newly visible to this account — usually the account being
  * added) or `update` (subject, description or settings) with no members.
+ *
+ * `remove_self` is ours, not Baileys': a `remove` where the linked number is
+ * among those removed. It's split out because a plain `remove` means someone
+ * else left the group — this means the gateway itself just lost access to
+ * it, which a consumer needs to react to differently (stop expecting replies
+ * there, rather than just updating a roster).
  */
 export type GroupChange = { action: string; participants: string[] };
 
