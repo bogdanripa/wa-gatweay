@@ -434,6 +434,16 @@
     <a href="#documents">Documents</a>.
   </div>
 
+  <h3>Reactions</h3>
+  <p>Someone reacting to a message arrives as an ordinary inbound message, on Meta's shape:</p>
+  <pre><code>{ "type": "reaction",
+  "reaction": { "message_id": "&lt;the message reacted to&gt;", "emoji": "👋" } }</code></pre>
+  <p class="muted">
+    An empty <code>emoji</code> means the reaction was taken back, not that a new one
+    arrived. In a 1:1 a reaction is often the whole reply, so it is worth handling rather
+    than discarding.
+  </p>
+
   <h3>Group membership</h3>
   <p>On Meta's <code>group_participants_update</code> field:</p>
   <pre><code>{ "field": "group_participants_update",

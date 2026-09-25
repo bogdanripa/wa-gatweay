@@ -971,3 +971,28 @@ test("a malformed mentions field tags nobody rather than failing the send", () =
     assert.equal(parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "x" }, mentions: "12025550100" }).kind.mentions, undefined);
     assert.equal(parseCloudSendRequest({ messaging_product: "whatsapp", to: "1", type: "text", text: { body: "x" }, mentions: [{}] }).kind.mentions, undefined);
 });
+
+test("a reaction is classified and forwarded, not dropped", () => {
+    const cls = classify({ reactionMessage: { key: { id: "ABC123" }, text: "\u{1F44B}" } });
+    assert.equal(cls.kind, "reaction");
+    assert.deepEqual(cls.reaction, { messageId: "ABC123", emoji: "\u{1F44B}" });
+
+    const msg = buildCloudMessageEvent(
+        { key: { id: "M1" }, messageTimestamp: 1 },
+        cls,
+        { chatJid: USER, senderJid: USER },
+        CLOUD_META
+    ).entry[0].changes[0].value.messages[0];
+    assert.equal(msg.type, "reaction");
+    assert.deepEqual(msg.reaction, { message_id: "ABC123", emoji: "\u{1F44B}" });
+});
+
+test("a removed reaction keeps its empty emoji, so a consumer can tell", () => {
+    const cls = classify({ reactionMessage: { key: { id: "ABC123" }, text: "" } });
+    assert.equal(cls.kind, "reaction");
+    assert.equal(cls.reaction.emoji, "");
+});
+
+test("a reaction with no target is still not forwardable", () => {
+    assert.equal(classify({ reactionMessage: { text: "\u{1F44B}" } }).kind, "skip");
+});

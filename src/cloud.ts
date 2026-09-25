@@ -402,6 +402,15 @@ export function buildCloudMessageEvent(
             message.type = "text";
             message.text = { body: cls.text || "" };
             break;
+        case "reaction":
+            // Meta's inbound shape exactly: the emoji plus the id of the message
+            // it lands on. An empty emoji means the reaction was removed.
+            message.type = "reaction";
+            message.reaction = {
+                message_id: cls.reaction?.messageId || "",
+                emoji: cls.reaction?.emoji || "",
+            };
+            break;
         case "image":
             message.type = "image";
             message.image = { link: media?.link, caption: cls.caption, mime_type: "image/jpeg" };

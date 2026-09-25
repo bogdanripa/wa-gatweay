@@ -14,13 +14,20 @@ export type MediaKind = "image" | "gif" | "voice" | "audio";
 
 export interface Classification {
     /** How a consumer should read this message. "skip" means don't forward at all. */
-    kind: "text" | MediaKind | "document" | "link_preview" | "skip";
+    kind: "text" | MediaKind | "document" | "link_preview" | "reaction" | "skip";
     /** Plain body text, when there is one. */
     text?: string;
     /** Caption riding along with media. */
     caption?: string;
     /** For link_preview: the unfurled card. */
     preview?: { title: string; description?: string };
+    /**
+     * Someone reacted to a message. `emoji` is empty when the reaction was
+     * removed, which is Meta's convention too — and the difference matters:
+     * a consumer that treats a removal as a new reaction answers a person who
+     * just took theirs back.
+     */
+    reaction?: { messageId: string; emoji: string };
     /** Populated for media kinds — the node session.ts must download. */
     mediaKind?: MediaKind;
     /**
@@ -177,9 +184,23 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
         return { kind: isVoice ? "voice" : "audio", mediaKind: isVoice ? "voice" : "audio" };
     }
 
-    // Stickers, contacts, locations, polls, reactions, protocol
-    // messages: there is no payload shape for these, so forwarding an empty
-    // envelope would only make a consumer log and discard it.
+    // A reaction is somebody answering a specific message without typing — in a
+    // 1:1 especially, a thumbs-up IS the reply. It used to be dropped here with
+    // the stickers, which left a bot talking to someone it believed had gone
+    // silent. Meta models it as an ordinary inbound message of type "reaction".
+    if (m.reactionMessage?.key?.id) {
+        return {
+            kind: "reaction",
+            reaction: {
+                messageId: String(m.reactionMessage.key.id),
+                emoji: String(m.reactionMessage.text || ""),
+            },
+        };
+    }
+
+    // Stickers, contacts, locations, polls, protocol messages: there is no
+    // payload shape for these, so forwarding an empty envelope would only make
+    // a consumer log and discard it.
     return { kind: "skip" };
 }
 
