@@ -96,6 +96,12 @@ function validateRate(raw: unknown): number | undefined {
     return n;
 }
 
+function validateFlag(name: string, raw: unknown): boolean {
+    if (raw === undefined || raw === null || raw === "" || raw === false || raw === "false") return false;
+    if (raw === true || raw === "true") return true;
+    throw new ValidationError(`${name} must be true or false`);
+}
+
 /**
  * Tokens are generated, never chosen. A bot's token is its only credential and
  * an operator-picked one would be the weakest link in the whole gateway.
@@ -126,6 +132,7 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         webhookUrl: doc.webhookUrl,
         pairPhone: doc.pairPhone,
         sendRatePerMinute: doc.sendRatePerMinute,
+        rejectCalls: !!doc.rejectCalls,
         phoneNumberId: doc.phoneNumberId,
     };
 }
@@ -135,12 +142,14 @@ export interface CreateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
+    rejectCalls?: unknown;
 }
 
 export interface UpdateSessionInput {
     webhookUrl?: unknown;
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
+    rejectCalls?: unknown;
 }
 
 export class SessionStore {
@@ -176,6 +185,7 @@ export class SessionStore {
             webhookUrl: validateWebhookUrl(input.webhookUrl),
             pairPhone: validatePairPhone(input.pairPhone),
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
+            ...(validateFlag("rejectCalls", input.rejectCalls) ? { rejectCalls: true } : {}),
             phoneNumberId: generatePhoneNumberId(),
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -218,6 +228,10 @@ export class SessionStore {
             const rate = validateRate(patch.sendRatePerMinute);
             if (rate) $set.sendRatePerMinute = rate;
             else $unset.sendRatePerMinute = "";
+        }
+        if (patch.rejectCalls !== undefined) {
+            if (validateFlag("rejectCalls", patch.rejectCalls)) $set.rejectCalls = true;
+            else $unset.rejectCalls = "";
         }
 
         await this.stores.sessions.updateOne(

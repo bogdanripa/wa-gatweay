@@ -204,6 +204,7 @@ function editForm(n) {
             const patch = {
                 webhookUrl: data.get("webhookUrl"),
                 sendRatePerMinute: data.get("sendRatePerMinute"),
+                rejectCalls: data.has("rejectCalls"),
             };
             // Only sent when the field was actually rendered. It is hidden for a
             // linked number, and an absent field reads as an empty string —
@@ -262,6 +263,11 @@ function editForm(n) {
                 value: n.sendRatePerMinute ? String(n.sendRatePerMinute) : "",
                 placeholder: "no limit",
             })
+        ),
+        el("label", { class: "check" },
+            el("input", { name: "rejectCalls", type: "checkbox", checked: !!n.rejectCalls }),
+            el("span", { text: "Reject calls" }),
+            el("small", { text: "Audio and video calls are declined at once and the bot gets a calls event, so it can answer in text." })
         ),
         el("div", { class: "row" },
             el("button", { type: "submit", text: "Save" }),
@@ -379,6 +385,7 @@ function card(n) {
         kv("Webhook", n.webhookUrl || "not set"),
         kv("Connected since", n.connectedAt ? new Date(n.connectedAt).toLocaleString() : "—"),
         kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
+        kv("Calls", n.rejectCalls ? "rejected" : "ring as usual"),
         n.webhookBacklog ? kv("Webhook backlog", String(n.webhookBacklog)) : null,
         n.reconnectAttempts ? kv("Reconnect attempts", String(n.reconnectAttempts)) : null,
         n.lastError ? kv("Last error", n.lastError) : null,
@@ -536,6 +543,7 @@ $("#add-form").addEventListener("submit", async (e) => {
                 webhookUrl: data.get("webhookUrl"),
                 pairPhone: data.get("pairPhone"),
                 sendRatePerMinute: data.get("sendRatePerMinute") || undefined,
+                rejectCalls: data.has("rejectCalls"),
             }),
         });
         form.reset();

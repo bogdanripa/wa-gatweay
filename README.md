@@ -138,7 +138,7 @@ And the management API behind the console, all of it requiring `Authorization: B
 |---|---|
 | `GET /api/mgmt/numbers` | every number, with status, QR and token |
 | `POST /api/mgmt/numbers` | add one; returns its generated token |
-| `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap |
+| `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap, `rejectCalls` |
 | `POST /api/mgmt/numbers/:id/rotate-token` | issue a new bot token, revoking the old |
 | `POST /api/mgmt/numbers/:id/relink` | unlink from WhatsApp and show a fresh QR |
 | `POST /api/mgmt/numbers/:id/restart` | bounce the socket, keeping credentials |

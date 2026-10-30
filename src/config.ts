@@ -50,6 +50,8 @@ export interface SessionConfig {
     pairPhone?: string;
     /** Outbound cap per minute. Absent means no cap at all. */
     sendRatePerMinute?: number;
+    /** Reject incoming calls and send the bot a `calls` event. Off by default. */
+    rejectCalls?: boolean;
     /** Meta-style stable numeric id for this number. */
     phoneNumberId: string;
 }

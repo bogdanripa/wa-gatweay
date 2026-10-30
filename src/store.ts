@@ -25,6 +25,8 @@ export interface SessionDoc {
     webhookUrl?: string;
     pairPhone?: string;
     sendRatePerMinute?: number;
+    /** Reject audio/video calls and tell the bot. Absent means calls ring as usual. */
+    rejectCalls?: boolean;
     /**
      * The analogue of Meta's `phone_number_id`: a stable, numeric, per-number
      * id. Minted at creation rather than derived from the linked phone, because

@@ -285,13 +285,14 @@ export class Session {
     }
 
     /**
-     * Someone calls the number (audio or video). Every number here is a bot,
-     * which can't talk: the call is rejected at once — it would otherwise ring
-     * out on the caller's phone — and the consumer is told, so it can answer in
-     * text. Only the offer: ringing, timeouts and the rest of a call's life are
-     * noise.
+     * Someone calls the number (audio or video). On a number set to
+     * `rejectCalls` — a bot that can't talk — the call is rejected at once (it
+     * would otherwise ring out on the caller's phone) and the consumer is told,
+     * so it can answer in text. Other numbers leave calls alone. Only the
+     * offer: ringing, timeouts and the rest of a call's life are noise.
      */
     private async onCalls(calls: Array<{ id: string; from: string; callerPn?: string; isGroup?: boolean; groupJid?: string; isVideo?: boolean; status: string; date?: Date }>) {
+        if (!this.cfg.rejectCalls) return;
         for (const c of calls) {
             if (c.status !== "offer") continue;
             try {
@@ -1741,6 +1742,7 @@ export class Session {
             phoneNumberId: this.cfg.phoneNumberId,
             pairPhone: this.cfg.pairPhone,
             sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
+            rejectCalls: !!this.cfg.rejectCalls,
             me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,
