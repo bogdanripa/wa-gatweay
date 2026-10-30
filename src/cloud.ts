@@ -511,6 +511,33 @@ export function buildCloudGroupEvent(
  */
 export type GroupChange = { action: string; participants: string[] };
 
+/**
+ * A call to the number, in the shape of Meta's Calling API webhook (`calls`
+ * change, `event: "connect"`). The gateway has already rejected it — a bot can't
+ * talk — so this only tells the consumer someone tried, to answer them in text.
+ * `type` ("audio" | "video") and `status: "rejected"` are ours beside Meta's.
+ */
+export function buildCloudCallEvent(
+    call: { id: string; from: string; timestamp: number; video: boolean; groupJid?: string },
+    meta: CloudMetadata
+): Record<string, any> {
+    return envelope(meta, "calls", {
+        calls: [
+            {
+                id: call.id,
+                from: call.from,
+                to: meta.displayPhoneNumber,
+                event: "connect",
+                direction: "USER_INITIATED",
+                timestamp: String(call.timestamp),
+                type: call.video ? "video" : "audio",
+                status: "rejected",
+                ...(call.groupJid ? { group_id: toChatId(call.groupJid) } : {}),
+            },
+        ],
+    });
+}
+
 /** Contact profile names, as Meta delivers them on a `contacts` change. */
 export function buildCloudContactsEvent(
     contacts: Array<{ id: string; name: string }>,

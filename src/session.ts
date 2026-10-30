@@ -31,6 +31,7 @@ import {
     type GroupChange,
     buildCloudMessageEvent,
     buildCloudPollVoteEvent,
+    buildCloudCallEvent,
     CloudRequestError,
     type CloudMetadata,
     type CloudSendKind,
@@ -278,6 +279,37 @@ export class Session {
         this.sock.ev.on("contacts.update", (c) => {
             if (current()) void this.onContacts(c);
         });
+        this.sock.ev.on("call", (calls) => {
+            if (current()) void this.onCalls(calls);
+        });
+    }
+
+    /**
+     * Someone calls the number (audio or video). Every number here is a bot,
+     * which can't talk: the call is rejected at once — it would otherwise ring
+     * out on the caller's phone — and the consumer is told, so it can answer in
+     * text. Only the offer: ringing, timeouts and the rest of a call's life are
+     * noise.
+     */
+    private async onCalls(calls: Array<{ id: string; from: string; callerPn?: string; isGroup?: boolean; groupJid?: string; isVideo?: boolean; status: string; date?: Date }>) {
+        for (const c of calls) {
+            if (c.status !== "offer") continue;
+            try {
+                await this.sock!.rejectCall(c.id, c.from);
+            } catch (e) {
+                this.log.warn({ e, id: c.id }, "couldn't reject a call");
+            }
+            const who = c.callerPn || (await this.resolveParticipant(c.from, c.isGroup ? c.groupJid : undefined, "a caller")) || c.from;
+            const from = digitsOf(who);
+            this.log.info({ id: c.id, video: !!c.isVideo, group: !!c.isGroup }, "call rejected");
+            if (!from) continue;
+            await this.webhook.send(
+                buildCloudCallEvent(
+                    { id: c.id, from, timestamp: Math.floor((c.date ? new Date(c.date).getTime() : Date.now()) / 1000), video: !!c.isVideo, groupJid: c.isGroup ? c.groupJid : undefined },
+                    this.cloudMeta()
+                )
+            );
+        }
     }
 
     private async onConnectionUpdate(

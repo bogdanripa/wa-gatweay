@@ -14,6 +14,7 @@ import {
 } from "../dist/jid.js";
 import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "../dist/map.js";
 import {
+    buildCloudCallEvent,
     buildCloudGroupEvent,
     buildCloudMessageEvent,
     buildCloudPollVoteEvent,
@@ -995,4 +996,24 @@ test("a removed reaction keeps its empty emoji, so a consumer can tell", () => {
 
 test("a reaction with no target is still not forwardable", () => {
     assert.equal(classify({ reactionMessage: { text: "\u{1F44B}" } }).kind, "skip");
+});
+
+// Meta's Calling API webhook: a `calls` change whose calls[] carry id, from, to,
+// event "connect", direction "USER_INITIATED" and a string timestamp. Ours adds
+// type and status (the call was rejected — a bot can't talk).
+test("a call arrives as Meta's `calls` change, marked rejected", () => {
+    const meta = { businessAccountId: "WABA", displayPhoneNumber: "40750271099", phoneNumberId: "gepetel" };
+    const ev = buildCloudCallEvent({ id: "CALL1", from: "40711111111", timestamp: 1730000000, video: true }, meta);
+    const change = ev.entry[0].changes[0];
+    assert.equal(change.field, "calls");
+    const c = change.value.calls[0];
+    assert.equal(c.id, "CALL1");
+    assert.equal(c.from, "40711111111");
+    assert.equal(c.to, "40750271099");
+    assert.equal(c.event, "connect");
+    assert.equal(c.direction, "USER_INITIATED");
+    assert.equal(c.timestamp, "1730000000");
+    assert.equal(c.type, "video");
+    assert.equal(c.status, "rejected");
+    assert.equal(change.value.metadata.phone_number_id, "gepetel");
 });
