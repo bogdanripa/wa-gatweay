@@ -640,7 +640,13 @@ export class Session {
         };
         const chatJid = await this.resolveToPn(key.remoteJid, key.remoteJidAlt);
         const isGroup = isGroupJid(msg.key.remoteJid);
-        if (!isGroup) this.watchPresence(msg.key.remoteJid, digitsOf(chatJid));
+        if (!isGroup) {
+            this.watchPresence(msg.key.remoteJid, digitsOf(chatJid));
+            // Their message ends that bout of typing: the next "composing" is a
+            // new one and goes out at once, not throttled as a repeat.
+            if (msg.key.remoteJid) this.lastPresence.delete(msg.key.remoteJid);
+            if (key.remoteJidAlt) this.lastPresence.delete(key.remoteJidAlt);
+        }
         const senderJid = isGroup
             ? await this.resolveToPn(key.participant || msg.participant, key.participantAlt)
             : chatJid;
