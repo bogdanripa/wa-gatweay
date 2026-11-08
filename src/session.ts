@@ -319,6 +319,7 @@ export class Session {
 
     /** 1:1 chats whose presence we asked for: jid → when, and the phone digits it stands for. */
     private watched = new Map<string, { at: number; from: string }>();
+    private onlineAt = 0;
     /** The last presence sent per jid, so a burst of "composing" becomes one event. */
     private lastPresence = new Map<string, { state: string; at: number }>();
     private static readonly WATCH_RENEW_MS = 10 * 60_000;
@@ -335,6 +336,14 @@ export class Session {
         if (w && Date.now() - w.at < Session.WATCH_RENEW_MS) return;
         this.watched.set(jid, { at: Date.now(), from });
         if (this.watched.size > 5000) this.watched.delete(this.watched.keys().next().value as string);
+        // WhatsApp only tells an account that is online who is typing — and
+        // this one connects offline (markOnlineOnConnect: false). So with
+        // typing events on, it goes online when it starts watching someone,
+        // and stays so (renewed with the watch).
+        if (Date.now() - this.onlineAt > Session.WATCH_RENEW_MS) {
+            this.onlineAt = Date.now();
+            void this.sock?.sendPresenceUpdate("available").catch((e) => this.log.debug({ e }, "going online failed"));
+        }
         void this.sock?.presenceSubscribe(jid).catch((e) => this.log.debug({ e }, "presence subscribe failed"));
     }
 
