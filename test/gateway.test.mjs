@@ -1054,3 +1054,25 @@ test("typing goes beside the queue: it doesn't wait for a message the bot is sti
     await msg;
     server.close();
 });
+
+test("a contact card arrives as Meta's contacts message, with its name and numbers", () => {
+    const vcard = "BEGIN:VCARD\nVERSION:3.0\nN:Pop;Ana;;;\nFN:Ana Pop\nORG:ICHB;\nitem1.TEL;waid=40712345678:+40 712 345 678\nitem1.X-ABLabel:Mobile\nTEL;type=WORK:+40 21 000 0000\nEMAIL:ana@example.com\nEND:VCARD";
+    const one = classify({ contactMessage: { displayName: "Ana", vcard } });
+    assert.equal(one.kind, "contacts");
+    assert.deepEqual(one.contacts[0], {
+        name: "Ana", org: "ICHB", emails: ["ana@example.com"],
+        phones: [{ phone: "+40 712 345 678", waId: "40712345678" }, { phone: "+40 21 000 0000", type: "WORK" }],
+    });
+    const many = classify({ contactsArrayMessage: { contacts: [{ vcard: "BEGIN:VCARD\nFN:Radu\nTEL:+40 700 111 222\nEND:VCARD" }, { vcard }] } });
+    assert.deepEqual(many.contacts.map((c) => c.name), ["Radu", "Ana Pop"]);
+    const ev = buildCloudMessageEvent(
+        { key: { id: "M1", remoteJid: "40700000000@s.whatsapp.net" }, messageTimestamp: 1 },
+        one,
+        { chatJid: "40700000000@s.whatsapp.net", senderJid: "40700000000@s.whatsapp.net" },
+        { phoneNumberId: "p", displayPhoneNumber: "d", wabaId: "w" }
+    );
+    const msg = ev.entry[0].changes[0].value.messages[0];
+    assert.equal(msg.type, "contacts");
+    assert.deepEqual(msg.contacts[0].phones[0], { phone: "+40 712 345 678", wa_id: "40712345678" });
+    assert.equal(msg.contacts[0].name.formatted_name, "Ana");
+});

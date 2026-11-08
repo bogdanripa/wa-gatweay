@@ -14,7 +14,7 @@ export type MediaKind = "image" | "gif" | "voice" | "audio";
 
 export interface Classification {
     /** How a consumer should read this message. "skip" means don't forward at all. */
-    kind: "text" | MediaKind | "document" | "link_preview" | "reaction" | "skip";
+    kind: "text" | MediaKind | "document" | "link_preview" | "reaction" | "contacts" | "skip";
     /** Plain body text, when there is one. */
     text?: string;
     /** Caption riding along with media. */
@@ -28,6 +28,8 @@ export interface Classification {
      * just took theirs back.
      */
     reaction?: { messageId: string; emoji: string };
+    /** Shared contact cards: the name and numbers from each vCard. */
+    contacts?: SharedContact[];
     /** Populated for media kinds — the node session.ts must download. */
     mediaKind?: MediaKind;
     /**
@@ -94,6 +96,8 @@ function contextInfoOf(message: proto.IMessage | null | undefined): proto.IConte
         m.audioMessage?.contextInfo ||
         m.documentMessage?.contextInfo ||
         m.stickerMessage?.contextInfo ||
+        m.contactMessage?.contextInfo ||
+        m.contactsArrayMessage?.contextInfo ||
         undefined
     );
 }
@@ -198,7 +202,16 @@ export function classify(message: proto.IMessage | null | undefined): Classifica
         };
     }
 
-    // Stickers, contacts, locations, polls, protocol messages: there is no
+    // A contact card (or several): someone handing over a person's number is
+    // asking the bot to do something with it — save it, write to them, add
+    // them to a group. Meta delivers these as type "contacts".
+    const cards = m.contactMessage ? [m.contactMessage] : m.contactsArrayMessage?.contacts || [];
+    if (cards.length) {
+        const contacts = cards.map((c) => parseVcard(c?.vcard || "", c?.displayName || "")).filter((c) => c.name || c.phones.length);
+        if (contacts.length) return { kind: "contacts", contacts };
+    }
+
+    // Stickers, locations, polls, protocol messages: there is no
     // payload shape for these, so forwarding an empty envelope would only make
     // a consumer log and discard it.
     return { kind: "skip" };
@@ -245,3 +258,39 @@ export interface ResolvedMedia {
     preview?: string;
 }
 
+
+/** One shared contact, as much of it as a bot needs. */
+export interface SharedContact {
+    name: string;
+    phones: { phone: string; waId?: string; type?: string }[];
+    emails: string[];
+    org?: string;
+}
+
+/**
+ * The parts of a vCard worth passing on. WhatsApp writes them itself
+ * (`TEL;type=CELL;waid=40712345678:+40 712 345 678`), but a card shared from a
+ * phone's address book can carry anything, so this reads leniently: unfolded
+ * lines, any parameter order, quoted-printable left alone.
+ */
+export function parseVcard(vcard: string, displayName = ""): SharedContact {
+    const lines = vcard.replace(/\r?\n[ \t]/g, "").split(/\r?\n/);
+    const out: SharedContact = { name: displayName.trim(), phones: [], emails: [] };
+    for (const line of lines) {
+        const i = line.indexOf(":");
+        if (i < 0) continue;
+        const [prop, ...params] = line.slice(0, i).split(";");
+        const value = line.slice(i + 1).trim();
+        const key = prop.replace(/^item\d+\./i, "").toUpperCase();
+        const param = (n: string) => params.find((x) => x.toLowerCase().startsWith(n + "="))?.split("=")[1];
+        if (key === "FN" && value && !out.name) out.name = value;
+        else if (key === "ORG" && value) out.org = value.split(";").filter(Boolean).join(", ");
+        else if (key === "EMAIL" && value) out.emails.push(value);
+        else if (key === "TEL" && value) {
+            const waId = param("waid");
+            const type = param("type") || params.find((x) => !x.includes("="));
+            out.phones.push({ phone: value, ...(waId ? { waId } : {}), ...(type ? { type: type.toUpperCase() } : {}) });
+        }
+    }
+    return out;
+}

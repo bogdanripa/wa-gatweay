@@ -442,6 +442,16 @@ export function buildCloudMessageEvent(
                 caption: cls.caption,
             };
             break;
+        case "contacts":
+            // Meta's inbound shape for shared contact cards.
+            message.type = "contacts";
+            message.contacts = (cls.contacts || []).map((c) => ({
+                name: { formatted_name: c.name },
+                phones: c.phones.map((ph) => ({ phone: ph.phone, ...(ph.waId ? { wa_id: ph.waId } : {}), ...(ph.type ? { type: ph.type } : {}) })),
+                ...(c.emails.length ? { emails: c.emails.map((email) => ({ email })) } : {}),
+                ...(c.org ? { org: { company: c.org } } : {}),
+            }));
+            break;
         case "link_preview":
             // A link preview is a text message with an unfurled card. Meta models
             // it as plain text, so the body is what a client actually gets.

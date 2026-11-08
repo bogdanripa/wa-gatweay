@@ -128,7 +128,7 @@ Paths are relative to the base URL, which is `https://<host>/api`:
 
 One send endpoint, as Meta has it. The per-verb routes this started with (`/messages/text`, `/messages/image`, `/messages/poll`, `PUT /messages/:id`, `PUT /messages/:id/reaction`, `PUT /presences/:to`) are gone — each was a second way to say what the Cloud shape already says, and two surfaces mean two to keep honest.
 
-Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, document, link preview), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies). With `typingEvents` on, also our own `presence` change for 1:1 chats: `presences[]` of `{ from, state: "typing" | "recording" | "paused", timestamp }` — Meta has no such webhook, so a number that didn't ask never sends one.
+Inbound webhook events: `messages[]` (text, image, GIF, voice, audio, document, link preview, contact cards as Meta's `contacts` type), `groups[]`, `contacts[]`, `messages_updates[]` (poll tallies). With `typingEvents` on, also our own `presence` change for 1:1 chats: `presences[]` of `{ from, state: "typing" | "recording" | "paused", timestamp }` — Meta has no such webhook, so a number that didn't ask never sends one.
 
 Plus gateway-only: `GET /api/health`, `GET /api/ready`, `GET /api/media/:id`.
 
