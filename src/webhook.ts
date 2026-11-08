@@ -75,11 +75,23 @@ export class WebhookSender {
         return task;
     }
 
+    /**
+     * Deliver now, beside the queue: once, no retries. For events whose worth
+     * is that they arrive at once and that ordering cannot spoil — someone
+     * typing. Queued, it waited behind the message the bot was still
+     * answering (a bot acks a message after its reply), so "typing" reached it
+     * just as the reply had already gone out.
+     */
+    sendNow(payload: Record<string, any>): Promise<void> {
+        if (!this.url) return Promise.resolve();
+        return this.deliver(payload, 1, false);
+    }
+
     get pending() {
         return this.depth;
     }
 
-    private async deliver(payload: Record<string, any>, attempt = 1): Promise<void> {
+    private async deliver(payload: Record<string, any>, attempt = 1, retry = true): Promise<void> {
         const MAX_ATTEMPTS = 4;
         const startedAt = Date.now();
         try {
@@ -131,6 +143,12 @@ export class WebhookSender {
                 "webhook delivered"
             );
         } catch (e) {
+            if (!retry) {
+                // Out of date in a second anyway: not worth a retry, nor a red
+                // "last failure" in the console.
+                this.log.debug({ e }, "webhook delivery failed (not retried)");
+                return;
+            }
             if (attempt >= MAX_ATTEMPTS) {
                 this.lastFailure = {
                     at: new Date(),

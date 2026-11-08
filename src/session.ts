@@ -367,7 +367,7 @@ export class Session {
         this.lastPresence.set(u.id, { state: next, at: Date.now() });
         const from = this.watched.get(u.id)?.from || digitsOf(await this.resolveToPn(u.id));
         if (!from) return;
-        await this.webhook.send(buildCloudPresenceEvent({ from, state: next as any, timestamp: Math.floor(Date.now() / 1000) }, this.cloudMeta()));
+        await this.webhook.sendNow(buildCloudPresenceEvent({ from, state: next as any, timestamp: Math.floor(Date.now() / 1000) }, this.cloudMeta()));
     }
 
     private async onConnectionUpdate(

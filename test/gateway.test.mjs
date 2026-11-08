@@ -1027,3 +1027,30 @@ test("someone typing arrives as our `presence` change, with the bare number", ()
     assert.deepEqual(change.value.presences, [{ from: "40711111111", state: "typing", timestamp: "1730000000" }]);
     assert.equal(change.value.metadata.phone_number_id, "gepetel");
 });
+
+test("typing goes beside the queue: it doesn't wait for a message the bot is still answering", async () => {
+    process.env.WA_MONGO_URL ||= "mongodb://127.0.0.1:1/unused";   // config loads; nothing connects
+    const { WebhookSender } = await import("../dist/webhook.js");
+    const http = await import("node:http");
+    const got = [];
+    let release;
+    const server = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+            const p = JSON.parse(body);
+            got.push(p.kind);
+            if (p.kind === "message") release = () => res.end("ok");   // the bot is busy replying
+            else res.end("ok");
+        });
+    });
+    await new Promise((r) => server.listen(0, r));
+    const w = new WebhookSender(`http://127.0.0.1:${server.address().port}/`, "t", "s");
+    const msg = w.send({ kind: "message" });
+    await new Promise((r) => setTimeout(r, 50));
+    await w.sendNow({ kind: "typing" });
+    assert.deepEqual(got, ["message", "typing"]);
+    release();
+    await msg;
+    server.close();
+});
