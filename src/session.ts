@@ -32,6 +32,7 @@ import {
     buildCloudMessageEvent,
     buildCloudPollVoteEvent,
     buildCloudCallEvent,
+    buildCloudPresenceEvent,
     CloudRequestError,
     type CloudMetadata,
     type CloudSendKind,
@@ -282,6 +283,9 @@ export class Session {
         this.sock.ev.on("call", (calls) => {
             if (current()) void this.onCalls(calls);
         });
+        this.sock.ev.on("presence.update", (p) => {
+            if (current()) void this.onPresence(p as any);
+        });
     }
 
     /**
@@ -311,6 +315,50 @@ export class Session {
                 )
             );
         }
+    }
+
+    /** 1:1 chats whose presence we asked for: jid → when, and the phone digits it stands for. */
+    private watched = new Map<string, { at: number; from: string }>();
+    /** The last presence sent per jid, so a burst of "composing" becomes one event. */
+    private lastPresence = new Map<string, { state: string; at: number }>();
+    private static readonly WATCH_RENEW_MS = 10 * 60_000;
+    private static readonly TYPING_REPEAT_MS = 8_000;
+
+    /**
+     * Someone wrote 1:1: ask WhatsApp for their presence, so their typing
+     * reaches us (it only sends it to whoever subscribed). Renewed now and then,
+     * never per message.
+     */
+    private watchPresence(jid: string, from: string) {
+        if (!this.cfg.typingEvents || !jid || isGroupJid(jid) || !from) return;
+        const w = this.watched.get(jid);
+        if (w && Date.now() - w.at < Session.WATCH_RENEW_MS) return;
+        this.watched.set(jid, { at: Date.now(), from });
+        if (this.watched.size > 5000) this.watched.delete(this.watched.keys().next().value as string);
+        void this.sock?.presenceSubscribe(jid).catch((e) => this.log.debug({ e }, "presence subscribe failed"));
+    }
+
+    /**
+     * Their presence changed. Typing and recording are sent (again at most
+     * every TYPING_REPEAT_MS while it lasts); "paused" once, when they stop
+     * after typing. Online/offline is nobody's business.
+     */
+    private async onPresence(u: { id: string; presences: Record<string, { lastKnownPresence?: string }> }) {
+        if (!this.cfg.typingEvents || !u?.id || isGroupJid(u.id)) return;
+        const raw = u.presences?.[u.id]?.lastKnownPresence || Object.values(u.presences || {})[0]?.lastKnownPresence;
+        const state = raw === "composing" ? "typing" : raw === "recording" ? "recording" : raw === "paused" ? "paused" : "";
+        const last = this.lastPresence.get(u.id);
+        if (!state) {
+            // Gone offline or just "available" after typing: that is a stop too.
+            if (!last || last.state === "paused") return;
+        }
+        const next = state || "paused";
+        if (last && last.state === next && (next === "paused" || Date.now() - last.at < Session.TYPING_REPEAT_MS)) return;
+        if (!last && next === "paused") return;
+        this.lastPresence.set(u.id, { state: next, at: Date.now() });
+        const from = this.watched.get(u.id)?.from || digitsOf(await this.resolveToPn(u.id));
+        if (!from) return;
+        await this.webhook.send(buildCloudPresenceEvent({ from, state: next as any, timestamp: Math.floor(Date.now() / 1000) }, this.cloudMeta()));
     }
 
     private async onConnectionUpdate(
@@ -583,6 +631,7 @@ export class Session {
         };
         const chatJid = await this.resolveToPn(key.remoteJid, key.remoteJidAlt);
         const isGroup = isGroupJid(msg.key.remoteJid);
+        if (!isGroup) this.watchPresence(msg.key.remoteJid, digitsOf(chatJid));
         const senderJid = isGroup
             ? await this.resolveToPn(key.participant || msg.participant, key.participantAlt)
             : chatJid;
@@ -1743,6 +1792,7 @@ export class Session {
             pairPhone: this.cfg.pairPhone,
             sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
             rejectCalls: !!this.cfg.rejectCalls,
+            typingEvents: !!this.cfg.typingEvents,
             me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,

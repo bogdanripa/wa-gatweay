@@ -205,6 +205,7 @@ function editForm(n) {
                 webhookUrl: data.get("webhookUrl"),
                 sendRatePerMinute: data.get("sendRatePerMinute"),
                 rejectCalls: data.has("rejectCalls"),
+                typingEvents: data.has("typingEvents"),
             };
             // Only sent when the field was actually rendered. It is hidden for a
             // linked number, and an absent field reads as an empty string —
@@ -268,6 +269,11 @@ function editForm(n) {
             el("input", { name: "rejectCalls", type: "checkbox", checked: !!n.rejectCalls }),
             el("span", { text: "Reject calls" }),
             el("small", { text: "Audio and video calls are declined at once and the bot gets a calls event, so it can answer in text." })
+        ),
+        el("label", { class: "check" },
+            el("input", { name: "typingEvents", type: "checkbox", checked: !!n.typingEvents }),
+            el("span", { text: "Typing events" }),
+            el("small", { text: "In 1:1 chats, the bot gets a presence event when someone is typing or recording, so it can wait for them." })
         ),
         el("div", { class: "row" },
             el("button", { type: "submit", text: "Save" }),
@@ -386,6 +392,7 @@ function card(n) {
         kv("Connected since", n.connectedAt ? new Date(n.connectedAt).toLocaleString() : "—"),
         kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
         kv("Calls", n.rejectCalls ? "rejected" : "ring as usual"),
+        kv("Typing events", n.typingEvents ? "sent" : "off"),
         n.webhookBacklog ? kv("Webhook backlog", String(n.webhookBacklog)) : null,
         n.reconnectAttempts ? kv("Reconnect attempts", String(n.reconnectAttempts)) : null,
         n.lastError ? kv("Last error", n.lastError) : null,
@@ -544,6 +551,7 @@ $("#add-form").addEventListener("submit", async (e) => {
                 pairPhone: data.get("pairPhone"),
                 sendRatePerMinute: data.get("sendRatePerMinute") || undefined,
                 rejectCalls: data.has("rejectCalls"),
+                typingEvents: data.has("typingEvents"),
             }),
         });
         form.reset();

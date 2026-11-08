@@ -18,6 +18,7 @@ import {
     buildCloudGroupEvent,
     buildCloudMessageEvent,
     buildCloudPollVoteEvent,
+    buildCloudPresenceEvent,
     buildCloudSendResponse,
     parseCloudSendRequest,
 } from "../dist/cloud.js";
@@ -1015,5 +1016,14 @@ test("a call arrives as Meta's `calls` change, marked rejected", () => {
     assert.equal(c.timestamp, "1730000000");
     assert.equal(c.type, "video");
     assert.equal(c.status, "rejected");
+    assert.equal(change.value.metadata.phone_number_id, "gepetel");
+});
+
+test("someone typing arrives as our `presence` change, with the bare number", () => {
+    const meta = { businessAccountId: "WABA", displayPhoneNumber: "40750271099", phoneNumberId: "gepetel" };
+    const ev = buildCloudPresenceEvent({ from: "40711111111", state: "typing", timestamp: 1730000000 }, meta);
+    const change = ev.entry[0].changes[0];
+    assert.equal(change.field, "presence");
+    assert.deepEqual(change.value.presences, [{ from: "40711111111", state: "typing", timestamp: "1730000000" }]);
     assert.equal(change.value.metadata.phone_number_id, "gepetel");
 });

@@ -133,6 +133,7 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         pairPhone: doc.pairPhone,
         sendRatePerMinute: doc.sendRatePerMinute,
         rejectCalls: !!doc.rejectCalls,
+        typingEvents: !!doc.typingEvents,
         phoneNumberId: doc.phoneNumberId,
     };
 }
@@ -143,6 +144,7 @@ export interface CreateSessionInput {
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
     rejectCalls?: unknown;
+    typingEvents?: unknown;
 }
 
 export interface UpdateSessionInput {
@@ -150,6 +152,7 @@ export interface UpdateSessionInput {
     pairPhone?: unknown;
     sendRatePerMinute?: unknown;
     rejectCalls?: unknown;
+    typingEvents?: unknown;
 }
 
 export class SessionStore {
@@ -186,6 +189,7 @@ export class SessionStore {
             pairPhone: validatePairPhone(input.pairPhone),
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
             ...(validateFlag("rejectCalls", input.rejectCalls) ? { rejectCalls: true } : {}),
+            ...(validateFlag("typingEvents", input.typingEvents) ? { typingEvents: true } : {}),
             phoneNumberId: generatePhoneNumberId(),
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -232,6 +236,10 @@ export class SessionStore {
         if (patch.rejectCalls !== undefined) {
             if (validateFlag("rejectCalls", patch.rejectCalls)) $set.rejectCalls = true;
             else $unset.rejectCalls = "";
+        }
+        if (patch.typingEvents !== undefined) {
+            if (validateFlag("typingEvents", patch.typingEvents)) $set.typingEvents = true;
+            else $unset.typingEvents = "";
         }
 
         await this.stores.sessions.updateOne(

@@ -91,6 +91,11 @@
         <span>Reject calls</span>
         <small>Audio and video calls are declined at once and the bot gets a calls event, so it can answer in text.</small>
       </label>
+      <label class="check">
+        <input name="typingEvents" type="checkbox">
+        <span>Typing events</span>
+        <small>In 1:1 chats, the bot gets a presence event when someone is typing or recording, so it can wait for them.</small>
+      </label>
       <button type="submit">Add number</button>
     </form>
     <p id="add-error" class="error" hidden></p>

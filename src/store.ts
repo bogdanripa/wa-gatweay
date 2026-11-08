@@ -27,6 +27,8 @@ export interface SessionDoc {
     sendRatePerMinute?: number;
     /** Reject audio/video calls and tell the bot. Absent means calls ring as usual. */
     rejectCalls?: boolean;
+    /** Send `presence` events (typing / recording / paused) for 1:1 chats. Absent means none. */
+    typingEvents?: boolean;
     /**
      * The analogue of Meta's `phone_number_id`: a stable, numeric, per-number
      * id. Minted at creation rather than derived from the linked phone, because

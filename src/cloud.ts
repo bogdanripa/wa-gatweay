@@ -538,6 +538,21 @@ export function buildCloudCallEvent(
     });
 }
 
+/**
+ * Someone typing to the number in a 1:1 chat — ours, Meta has no such webhook.
+ * A `presence` change with `state` "typing", "recording" (a voice note) or
+ * "paused" (stopped without sending). Sent only on a number set to
+ * `typingEvents`, so a consumer that never asked never sees one.
+ */
+export function buildCloudPresenceEvent(
+    p: { from: string; state: "typing" | "recording" | "paused"; timestamp: number },
+    meta: CloudMetadata
+): Record<string, any> {
+    return envelope(meta, "presence", {
+        presences: [{ from: p.from, state: p.state, timestamp: String(p.timestamp) }],
+    });
+}
+
 /** Contact profile names, as Meta delivers them on a `contacts` change. */
 export function buildCloudContactsEvent(
     contacts: Array<{ id: string; name: string }>,

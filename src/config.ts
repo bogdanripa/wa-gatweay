@@ -52,6 +52,8 @@ export interface SessionConfig {
     sendRatePerMinute?: number;
     /** Reject incoming calls and send the bot a `calls` event. Off by default. */
     rejectCalls?: boolean;
+    /** Watch the presence of people who write 1:1 and send the bot a `presence` event when they type. Off by default. */
+    typingEvents?: boolean;
     /** Meta-style stable numeric id for this number. */
     phoneNumberId: string;
 }
