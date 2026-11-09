@@ -317,25 +317,43 @@ export class Session {
         }
     }
 
-    /** 1:1 chats whose presence we asked for: jid → when, and the phone digits it stands for. */
-    private watched = new Map<string, { at: number; from: string }>();
+    /** 1:1 chats whose presence we asked for: jid → when we last asked, when they last wrote, and the phone digits it stands for. */
+    private watched = new Map<string, { at: number; wrote: number; from: string }>();
     private onlineAt = 0;
     /** The last presence sent per jid, so a burst of "composing" becomes one event. */
     private lastPresence = new Map<string, { state: string; at: number }>();
+    /** The last online/offline sent per jid: a change goes out, and "online" again now and then while it lasts. */
+    private lastOnline = new Map<string, { state: string; at: number }>();
+    private renewTimer?: NodeJS.Timeout;
     private static readonly WATCH_RENEW_MS = 10 * 60_000;
+    private static readonly WATCH_KEEP_MS = 7 * 24 * 3600_000;
     private static readonly TYPING_REPEAT_MS = 8_000;
+    private static readonly ONLINE_REPEAT_MS = 5 * 60_000;
 
     /**
      * Someone wrote 1:1: ask WhatsApp for their presence, so their typing
      * reaches us (it only sends it to whoever subscribed). Renewed now and then,
-     * never per message.
+     * never per message — and kept up for a week after they last wrote
+     * (renewWatches), so the consumer also hears when they're back online, at
+     * any hour.
      */
     private watchPresence(jid: string, from: string) {
         if (!this.cfg.typingEvents || !jid || isGroupJid(jid) || !from) return;
         const w = this.watched.get(jid);
+        if (w) { w.wrote = Date.now(); w.from = from; }
         if (w && Date.now() - w.at < Session.WATCH_RENEW_MS) return;
-        this.watched.set(jid, { at: Date.now(), from });
+        this.watched.set(jid, { at: 0, wrote: Date.now(), from });
         if (this.watched.size > 5000) this.watched.delete(this.watched.keys().next().value as string);
+        this.subscribe(jid);
+        if (!this.renewTimer) {
+            this.renewTimer = setInterval(() => this.renewWatches(), Session.WATCH_RENEW_MS);
+            this.renewTimer.unref?.();
+        }
+    }
+
+    private subscribe(jid: string) {
+        const w = this.watched.get(jid);
+        if (w) w.at = Date.now();
         // WhatsApp only tells an account that is online who is typing — and
         // this one connects offline (markOnlineOnConnect: false). So with
         // typing events on, it goes online when it starts watching someone,
@@ -347,14 +365,43 @@ export class Session {
         void this.sock?.presenceSubscribe(jid).catch((e) => this.log.debug({ e }, "presence subscribe failed"));
     }
 
+    /** Keep watching everyone who wrote in the last week; forget the rest. */
+    private renewWatches() {
+        if (this.status !== "connected" || !this.cfg.typingEvents) return;
+        const now = Date.now();
+        for (const [jid, w] of this.watched) {
+            if (now - w.wrote > Session.WATCH_KEEP_MS) { this.watched.delete(jid); this.lastOnline.delete(jid); continue; }
+            if (now - w.at >= Session.WATCH_RENEW_MS - 5_000) this.subscribe(jid);
+        }
+    }
+
     /**
      * Their presence changed. Typing and recording are sent (again at most
      * every TYPING_REPEAT_MS while it lasts); "paused" once, when they stop
-     * after typing. Online/offline is nobody's business.
+     * after typing. Online and offline go out too, for the people being
+     * watched: a change at once, "online" again at most every
+     * ONLINE_REPEAT_MS, and "offline" with when they were last seen, when
+     * WhatsApp says (their privacy settings may hide it).
      */
-    private async onPresence(u: { id: string; presences: Record<string, { lastKnownPresence?: string }> }) {
+    private async onPresence(u: { id: string; presences: Record<string, { lastKnownPresence?: string; lastSeen?: number }> }) {
         if (!this.cfg.typingEvents || !u?.id || isGroupJid(u.id)) return;
-        const raw = u.presences?.[u.id]?.lastKnownPresence || Object.values(u.presences || {})[0]?.lastKnownPresence;
+        const data = u.presences?.[u.id] || Object.values(u.presences || {})[0];
+        const raw = data?.lastKnownPresence;
+        const from = () => this.watched.get(u.id)?.from || this.resolveToPn(u.id).then(digitsOf);
+
+        // Online / offline.
+        const avail = raw === "unavailable" ? "offline" : raw ? "online" : "";
+        const lastOn = this.lastOnline.get(u.id);
+        if (avail && (!lastOn || lastOn.state !== avail || (avail === "online" && Date.now() - lastOn.at >= Session.ONLINE_REPEAT_MS))) {
+            this.lastOnline.set(u.id, { state: avail, at: Date.now() });
+            const f = await from();
+            if (f) await this.webhook.sendNow(buildCloudPresenceEvent({
+                from: f, state: avail, timestamp: Math.floor(Date.now() / 1000),
+                ...(avail === "offline" && data?.lastSeen ? { lastSeen: Math.floor(Number(data.lastSeen)) } : {}),
+            }, this.cloudMeta()));
+        }
+
+        // Typing.
         const state = raw === "composing" ? "typing" : raw === "recording" ? "recording" : raw === "paused" ? "paused" : "";
         const last = this.lastPresence.get(u.id);
         if (!state) {
@@ -365,9 +412,9 @@ export class Session {
         if (last && last.state === next && (next === "paused" || Date.now() - last.at < Session.TYPING_REPEAT_MS)) return;
         if (!last && next === "paused") return;
         this.lastPresence.set(u.id, { state: next, at: Date.now() });
-        const from = this.watched.get(u.id)?.from || digitsOf(await this.resolveToPn(u.id));
-        if (!from) return;
-        await this.webhook.sendNow(buildCloudPresenceEvent({ from, state: next as any, timestamp: Math.floor(Date.now() / 1000) }, this.cloudMeta()));
+        const f = await from();
+        if (!f) return;
+        await this.webhook.sendNow(buildCloudPresenceEvent({ from: f, state: next as any, timestamp: Math.floor(Date.now() / 1000) }, this.cloudMeta()));
     }
 
     private async onConnectionUpdate(
@@ -463,6 +510,7 @@ export class Session {
 
     async stop() {
         this.stopping = true;
+        if (this.renewTimer) { clearInterval(this.renewTimer); this.renewTimer = undefined; }
         this.generation++;
         try {
             this.sock?.end(undefined);

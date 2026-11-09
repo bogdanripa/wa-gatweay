@@ -551,15 +551,17 @@ export function buildCloudCallEvent(
 /**
  * Someone typing to the number in a 1:1 chat — ours, Meta has no such webhook.
  * A `presence` change with `state` "typing", "recording" (a voice note) or
- * "paused" (stopped without sending). Sent only on a number set to
+ * "paused" (stopped without sending); and "online" / "offline" (with
+ * `last_seen` when WhatsApp gives it) for people who wrote in the last week.
+ * Sent only on a number set to
  * `typingEvents`, so a consumer that never asked never sees one.
  */
 export function buildCloudPresenceEvent(
-    p: { from: string; state: "typing" | "recording" | "paused"; timestamp: number },
+    p: { from: string; state: "typing" | "recording" | "paused" | "online" | "offline"; timestamp: number; lastSeen?: number },
     meta: CloudMetadata
 ): Record<string, any> {
     return envelope(meta, "presence", {
-        presences: [{ from: p.from, state: p.state, timestamp: String(p.timestamp) }],
+        presences: [{ from: p.from, state: p.state, timestamp: String(p.timestamp), ...(p.lastSeen ? { last_seen: String(p.lastSeen) } : {}) }],
     });
 }
 

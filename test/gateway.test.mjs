@@ -1028,6 +1028,14 @@ test("someone typing arrives as our `presence` change, with the bare number", ()
     assert.equal(change.value.metadata.phone_number_id, "gepetel");
 });
 
+test("online and offline arrive as presence too, offline with when they were last seen", () => {
+    const meta = { businessAccountId: "WABA", displayPhoneNumber: "40750271099", phoneNumberId: "gepetel" };
+    const on = buildCloudPresenceEvent({ from: "40711111111", state: "online", timestamp: 1730000000 }, meta);
+    assert.deepEqual(on.entry[0].changes[0].value.presences, [{ from: "40711111111", state: "online", timestamp: "1730000000" }]);
+    const off = buildCloudPresenceEvent({ from: "40711111111", state: "offline", timestamp: 1730000600, lastSeen: 1730000500 }, meta);
+    assert.deepEqual(off.entry[0].changes[0].value.presences, [{ from: "40711111111", state: "offline", timestamp: "1730000600", last_seen: "1730000500" }]);
+});
+
 test("typing goes beside the queue: it doesn't wait for a message the bot is still answering", async () => {
     process.env.WA_MONGO_URL ||= "mongodb://127.0.0.1:1/unused";   // config loads; nothing connects
     const { WebhookSender } = await import("../dist/webhook.js");
