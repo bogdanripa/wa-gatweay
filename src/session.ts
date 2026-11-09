@@ -1356,7 +1356,7 @@ export class Session {
             if (k.type === "audio") content = { audio: media, mimetype: "audio/mp4" };
             else if (k.type === "video") content = { video: media, caption: k.caption };
             else if (k.type === "sticker") content = { sticker: media };
-            else content = { document: media, caption: k.caption, fileName: k.filename || "file" };
+            else content = { document: media, caption: k.caption, fileName: k.filename || "file", mimetype: documentMime(k.media, k.filename) };
         }
 
         const sent = await sock.sendMessage(jid, content as any, await this.quoteOptions(replyTo));
@@ -1869,4 +1869,21 @@ export class Session {
             reconnectAttempts: this.reconnectAttempts,
         };
     }
+}
+
+/**
+ * A document's type, so it opens as what it is (a PDF as a PDF): from its
+ * data: URI, else from the file name, else a plain file.
+ */
+export function documentMime(media: string, filename?: string): string {
+    const fromUri = /^data:([^;,]+)/.exec(media || "")?.[1];
+    if (fromUri) return fromUri;
+    const ext = String(filename || "").toLowerCase().split(".").pop() || "";
+    const byExt: Record<string, string> = {
+        pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        txt: "text/plain", csv: "text/csv", zip: "application/zip", ics: "text/calendar", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    };
+    return byExt[ext] || "application/octet-stream";
 }

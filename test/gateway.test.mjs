@@ -1084,3 +1084,11 @@ test("a contact card arrives as Meta's contacts message, with its name and numbe
     assert.deepEqual(msg.contacts[0].phones[0], { phone: "+40 712 345 678", wa_id: "40712345678" });
     assert.equal(msg.contacts[0].name.formatted_name, "Ana");
 });
+
+test("a document goes out with its type: from the data: URI, else the file name", async () => {
+    process.env.WA_MONGO_URL ||= "mongodb://127.0.0.1:1/unused";
+    const { documentMime } = await import("../dist/session.js");
+    assert.equal(documentMime("data:application/pdf;name=x.pdf;base64,AAAA", "x.pdf"), "application/pdf");
+    assert.equal(documentMime("AAAA", "Slides.PPTX"), "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    assert.equal(documentMime("https://example.com/f", "noext"), "application/octet-stream");
+});
