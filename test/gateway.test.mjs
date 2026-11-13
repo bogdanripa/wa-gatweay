@@ -12,7 +12,7 @@ import {
     toChatId,
     toUserId,
 } from "../dist/jid.js";
-import { classify, mentionedJidsOf, quotedContextOf, unwrap } from "../dist/map.js";
+import { classify, forwardedOf, mentionedJidsOf, quotedContextOf, unwrap } from "../dist/map.js";
 import {
     buildCloudCallEvent,
     buildCloudGroupEvent,
@@ -1091,4 +1091,36 @@ test("a document goes out with its type: from the data: URI, else the file name"
     assert.equal(documentMime("data:application/pdf;name=x.pdf;base64,AAAA", "x.pdf"), "application/pdf");
     assert.equal(documentMime("AAAA", "Slides.PPTX"), "application/vnd.openxmlformats-officedocument.presentationml.presentation");
     assert.equal(documentMime("https://example.com/f", "noext"), "application/octet-stream");
+});
+
+// ----------------------------------------------------------------- forwarded
+//
+// Meta's shape: `context: { forwarded: true }`, plus `frequently_forwarded: true`
+// for WhatsApp's "forwarded many times". A forward quotes nothing, so it is not
+// a reply — and a consumer that never hears about it credits the words to
+// whoever passed them on.
+
+test("a forwarded text is marked forwarded, and is not a reply", () => {
+    const m = { extendedTextMessage: { text: "Ne vedem mâine la 6", contextInfo: { isForwarded: true, forwardingScore: 1 } } };
+    assert.deepEqual(forwardedOf(m), { forwarded: true });
+    assert.equal(quotedContextOf(m), undefined);
+});
+
+test("forwarded many times is WhatsApp's score above 4", () => {
+    const m = { imageMessage: { caption: "x", contextInfo: { isForwarded: true, forwardingScore: 5 } } };
+    assert.deepEqual(forwardedOf(m), { forwarded: true, frequently_forwarded: true });
+    assert.deepEqual(forwardedOf({ extendedTextMessage: { text: "x", contextInfo: { isForwarded: true, forwardingScore: 4 } } }), { forwarded: true });
+});
+
+test("a message that was not forwarded has no forwarded mark", () => {
+    assert.equal(forwardedOf({ conversation: "plain" }), undefined);
+    assert.equal(forwardedOf({ extendedTextMessage: { text: "@1 hi", contextInfo: { mentionedJid: ["1@lid"] } } }), undefined);
+});
+
+test("forwarded reaches the webhook payload in Meta's context shape", () => {
+    const msg = withContext(
+        { extendedTextMessage: { text: "fwd", contextInfo: { isForwarded: true, forwardingScore: 1 } } },
+        { context: { forwarded: true } }
+    );
+    assert.deepEqual(msg.context, { forwarded: true });
 });

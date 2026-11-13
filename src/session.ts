@@ -22,6 +22,7 @@ import {
     classify,
     mentionedJidsOf,
     quotedContextOf,
+    forwardedOf,
     unwrap,
     type MentionedIdentity,
 } from "./map.js";
@@ -736,7 +737,7 @@ export class Session {
         // Only set when the message actually replies to something, so the payload
         // is byte-identical to before for everything else.
         const quoted = quotedContextOf(msg.message);
-        let context: { id: string; from?: string } | undefined;
+        let context: { id?: string; from?: string; forwarded?: boolean; frequently_forwarded?: boolean } | undefined;
         if (quoted) {
             const from = quoted.participant
                 ? await this.resolveParticipant(
@@ -752,6 +753,11 @@ export class Session {
                 from: toUserId(from ?? quoted.participant ?? "") || undefined,
             };
         }
+        // Passed on, in Meta's shape: the same `context` block, `forwarded` and
+        // `frequently_forwarded`. A forward quotes nothing, so this stands on its
+        // own — without it a bot credits forwarded words to whoever passed them on.
+        const fwd = forwardedOf(msg.message);
+        if (fwd) context = { ...(context || {}), ...fwd };
 
         this.noteInbound({
             at: Session.sentAt(msg),

@@ -128,6 +128,20 @@ export function quotedContextOf(message: proto.IMessage | null | undefined): Quo
     return { id: ctx.stanzaId, participant: ctx.participant || undefined };
 }
 
+/**
+ * Was this message passed on rather than written? Meta's own fields:
+ * `context.forwarded`, and `context.frequently_forwarded` for WhatsApp's
+ * "forwarded many times" mark (a forwarding score above 4, which is when the
+ * app shows the double arrow). Undefined when it wasn't forwarded, so every
+ * other payload stays byte-identical.
+ */
+export function forwardedOf(message: proto.IMessage | null | undefined): { forwarded: true; frequently_forwarded?: true } | undefined {
+    const ctx = contextInfoOf(message);
+    const score = Number(ctx?.forwardingScore || 0);
+    if (!ctx?.isForwarded && score <= 0) return undefined;
+    return score > 4 ? { forwarded: true, frequently_forwarded: true } : { forwarded: true };
+}
+
 export function classify(message: proto.IMessage | null | undefined): Classification {
     const m = unwrap(message);
     if (!m) return { kind: "skip" };
@@ -242,7 +256,7 @@ export interface ResolvedIds {
      * Set only when the message is a reply. Additive: everything else in the
      * payload is unchanged whether this is present or not.
      */
-    context?: { id: string; from?: string };
+    context?: { id?: string; from?: string; forwarded?: boolean; frequently_forwarded?: boolean };
     /** Already LID-resolved chat JID. */
     chatJid: string;
     /** Already LID-resolved sender JID (for groups: the participant). */
