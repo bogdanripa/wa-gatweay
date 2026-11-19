@@ -61,7 +61,11 @@
       <code id="mcp-url" class="v"></code>
       <button class="ghost copy" data-copy="#mcp-url">Copy</button>
     </div>
-    <p class="muted">For numbers with MCP access on: an assistant connects here with that number's MCP token.</p>
+    <p class="muted">
+      For numbers with MCP access on. Add this URL as a connector in Claude (Settings → Connectors → Add custom
+      connector) or run <code>claude mcp add --transport http whatsapp &lt;URL&gt;</code>. The assistant opens a sign-in
+      page where you approve it and pick the number. No token to copy.
+    </p>
   </section>
 
   <div id="numbers"></div>
@@ -105,7 +109,7 @@
       <label class="check">
         <input name="mcp" type="checkbox">
         <span>MCP access</span>
-        <small>Lets an assistant (Claude Code / Desktop) read chats and send as this account at /api/mcp, with its own token. Keeps the chat list and contact names, never message text.</small>
+        <small>Lets an assistant you approve (Claude, Claude Code) read chats and send as this account. It signs in at the MCP URL and you pick this number. Keeps the chat list and contact names, never message text.</small>
       </label>
       <button type="submit">Add number</button>
     </form>
@@ -128,21 +132,6 @@
   </div>
 </dialog>
 
-<dialog id="mcp-dialog">
-  <h2>MCP access for <span id="mcp-for"></span></h2>
-  <p class="muted">
-    Anyone with this token can read this account's chats and send messages as it.
-    It is separate from the bot token.
-  </p>
-  <p class="muted">Add it to Claude Code:</p>
-  <code id="mcp-command" class="token"></code>
-  <div class="row">
-    <button class="ghost copy" data-copy="#mcp-command">Copy command</button>
-    <button class="ghost copy" data-copy="#mcp-token">Copy token</button>
-    <button id="mcp-close">Done</button>
-  </div>
-  <code id="mcp-token" hidden></code>
-</dialog>
 
 <script src="app.js"></script>
 </body>

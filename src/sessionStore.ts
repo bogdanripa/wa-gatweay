@@ -134,7 +134,7 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         sendRatePerMinute: doc.sendRatePerMinute,
         rejectCalls: !!doc.rejectCalls,
         typingEvents: !!doc.typingEvents,
-        mcpToken: doc.mcpToken,
+        mcp: !!doc.mcp,
         phoneNumberId: doc.phoneNumberId,
     };
 }
@@ -155,7 +155,7 @@ export interface UpdateSessionInput {
     sendRatePerMinute?: unknown;
     rejectCalls?: unknown;
     typingEvents?: unknown;
-    /** MCP access on or off. On mints `mcpToken` (kept if already on); off deletes it. */
+    /** MCP access on or off. Off revokes every assistant approved for the number. */
     mcp?: unknown;
 }
 
@@ -172,10 +172,18 @@ export class SessionStore {
         for (const doc of docs) {
             const patch: Partial<SessionDoc> = {};
             if (!doc.phoneNumberId) patch.phoneNumberId = generatePhoneNumberId();
+            // MCP briefly used a static bearer token before OAuth. A number that
+            // had one had MCP on, so it keeps MCP on; the token itself is dropped
+            // — it opens nothing any more.
+            if (doc.mcpToken) patch.mcp = true;
             if (!Object.keys(patch).length) continue;
 
             Object.assign(doc, patch);
-            await this.stores.sessions.updateOne({ _id: doc._id }, { $set: patch });
+            delete doc.mcpToken;
+            await this.stores.sessions.updateOne(
+                { _id: doc._id },
+                { $set: patch, $unset: { mcpToken: "" } }
+            );
         }
         return docs;
     }
@@ -194,7 +202,7 @@ export class SessionStore {
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
             ...(validateFlag("rejectCalls", input.rejectCalls) ? { rejectCalls: true } : {}),
             ...(validateFlag("typingEvents", input.typingEvents) ? { typingEvents: true } : {}),
-            ...(validateFlag("mcp", input.mcp) ? { mcpToken: generateToken() } : {}),
+            ...(validateFlag("mcp", input.mcp) ? { mcp: true } : {}),
             phoneNumberId: generatePhoneNumberId(),
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -247,11 +255,8 @@ export class SessionStore {
             else $unset.typingEvents = "";
         }
         if (patch.mcp !== undefined) {
-            // Turning it on again keeps the existing token, so re-saving the form
-            // doesn't silently break a configured client. Off is the revocation.
-            if (validateFlag("mcp", patch.mcp)) {
-                if (!existing.mcpToken) $set.mcpToken = generateToken();
-            } else $unset.mcpToken = "";
+            if (validateFlag("mcp", patch.mcp)) $set.mcp = true;
+            else $unset.mcp = "";
         }
 
         await this.stores.sessions.updateOne(
@@ -270,15 +275,6 @@ export class SessionStore {
             { $set: { token, updatedAt: new Date() } }
         );
         return { ...existing, token };
-    }
-
-    async rotateMcpToken(id: string): Promise<SessionDoc> {
-        const existing = await this.get(id);
-        if (!existing) throw new NotFoundError(`no number with id "${id}"`);
-        if (!existing.mcpToken) throw new ValidationError(`MCP access is off for "${id}" — turn it on first`);
-        const mcpToken = generateToken();
-        await this.stores.sessions.updateOne({ _id: id }, { $set: { mcpToken, updatedAt: new Date() } });
-        return { ...existing, mcpToken };
     }
 
     async remove(id: string): Promise<void> {
@@ -311,13 +307,16 @@ export async function purgeSessionState(stores: Stores, sessionId: string): Prom
 
 
 /**
- * Forget the chat list and names kept for MCP. Called on removal and when MCP
- * is turned off: the index exists only to serve MCP, so a number that no longer
- * offers it should not keep a record of who it talks to.
+ * Revoke every assistant approved for this number and forget the chat list
+ * and names kept for MCP. Called on removal and when MCP is turned off: the
+ * index exists only to serve MCP, so a number that no longer offers it should
+ * not keep a record of who it talks to — and nothing should still hold a
+ * token that acts as it.
  */
 export async function purgeMcpState(stores: Stores, sessionId: string): Promise<void> {
     await Promise.all([
         stores.chats.deleteMany({ sessionId }),
         stores.contacts.deleteMany({ sessionId }),
+        stores.oauthGrants.deleteMany({ sessionId }),
     ]);
 }

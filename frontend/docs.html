@@ -669,7 +669,7 @@
       <tr><td><code><span class="m">POST</span> /mgmt/numbers</code></td><td><code>{ id, webhookUrl, pairPhone?, sendRatePerMinute? }</code> → its new token</td></tr>
       <tr><td><code><span class="m">PATCH</span> /mgmt/numbers/:id</code></td><td>change webhook URL, pairing phone or rate cap</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/rotate-token</code></td><td>issue a new token, revoking the old one</td></tr>
-      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/rotate-mcp-token</code></td><td>issue a new MCP token (see below), revoking the old one</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/disconnect-mcp</code></td><td>revoke every assistant approved for the number (see <a href="#mcp">MCP</a>)</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/relink</code></td><td>unlink from WhatsApp and show a fresh QR</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/restart</code></td><td>reconnect without touching credentials</td></tr>
       <tr><td><code><span class="m">DELETE</span> /mgmt/numbers/:id</code></td><td>remove the number and purge its stored state</td></tr>
@@ -687,12 +687,23 @@
   <h2>MCP</h2>
   <p>
     Turn on <strong>MCP access</strong> for a number and it is also a Model Context Protocol
-    server, so an assistant such as Claude Code can read chats and send <em>as that
-    account</em>. It is meant for linking your own number. It has its own token, shown in
-    the console, which is not the bot token:
+    server, so an assistant can read chats and send <em>as that account</em>. It is meant
+    for linking your own number. Connect it like any remote MCP server — there is no token
+    to copy:
   </p>
-  <pre><code>claude mcp add --transport http whatsapp <span class="mcp-url">https://wa-gateway.example.com/api/mcp</span> \
-  --header 'Authorization: Bearer &lt;MCP token&gt;'</code></pre>
+  <ul>
+    <li><strong>Claude</strong> (web, desktop, mobile): Settings → Connectors → Add custom
+      connector, with the URL below.</li>
+    <li><strong>Claude Code</strong>:</li>
+  </ul>
+  <pre><code>claude mcp add --transport http whatsapp <span class="mcp-url">https://wa-gateway.example.com/api/mcp</span></code></pre>
+  <p>
+    The assistant opens a sign-in page here. Enter the management key (skipped if this
+    browser has the console unlocked), pick the number, and approve. That is standard
+    OAuth 2.1 with PKCE: the assistant registers itself, gets a token for that one number,
+    and refreshes it on its own. Disconnect it from the console any time, or turn MCP off
+    for the number to cut every assistant off at once.
+  </p>
   <p>
     Tools: <code>list_chats</code>, <code>search_contacts</code>, <code>read_chat</code>,
     <code>search_chat</code>, <code>get_media</code>, <code>group_info</code>,

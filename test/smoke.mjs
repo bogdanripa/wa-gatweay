@@ -163,7 +163,7 @@ async function waitForBoot() {
 }
 
 let child = boot();
-/** Set by the MCP checks, read again after the restart. */
+/** An MCP access token from the OAuth checks, used again after the restart. */
 let mcpToken;
 let tokenA = "";
 let tokenB = "";
@@ -552,7 +552,7 @@ try {
         `status=${docBytesUnknown.status}`
     );
 
-    // --- MCP: opt-in, its own token, stateless JSON-RPC ----------------------
+    // --- MCP over OAuth: discovery, registration, approval, PKCE, refresh -----
 
     const mcpPost = (token, body) =>
         fetch(`${base}/mcp`, {
@@ -571,45 +571,199 @@ try {
         capabilities: {},
         clientInfo: { name: "smoke", version: "0" },
     });
+    const form = (o) => new URLSearchParams(o).toString();
+    const tokenPost = (o) =>
+        fetch(`${base}/oauth/token`, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: form(o),
+        });
+    const { createHash, randomBytes } = await import("node:crypto");
+    const pkce = () => {
+        const verifier = randomBytes(32).toString("base64url");
+        return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") };
+    };
+    const REDIRECT = "http://localhost:53682/callback";
 
     const beforeOn = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "alpha-bot");
-    check("MCP access is off by default", beforeOn?.mcpEnabled === false && beforeOn?.mcpToken === null);
+    check("MCP access is off by default", beforeOn?.mcpEnabled === false);
 
-    const enable = await (await mgmt("/numbers/alpha-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
-    mcpToken = enable.number?.mcpToken;
-    check("turning MCP on mints a separate token", !!mcpToken && mcpToken.length >= 32 && mcpToken !== tokenA);
-
-    const again = await (await mgmt("/numbers/alpha-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
-    check("re-saving with MCP on keeps the same token", again.number?.mcpToken === mcpToken);
-
+    // Discovery, exactly as an MCP client walks it.
     const mcpNoAuth = await mcpPost(undefined, init);
-    check("MCP rejects a missing token", mcpNoAuth.status === 401, `status=${mcpNoAuth.status}`);
-
-    const mcpBotToken = await mcpPost(tokenA, init);
-    const mcpBotTokenJson = await mcpBotToken.json();
+    const wwwAuth = mcpNoAuth.headers.get("www-authenticate") || "";
+    const prmUrl = /resource_metadata="([^"]+)"/.exec(wwwAuth)?.[1];
     check(
-        "MCP rejects the bot token, and says so",
-        mcpBotToken.status === 401 && /bot token/.test(mcpBotTokenJson?.error?.message || ""),
-        `status=${mcpBotToken.status}`
+        "an unauthenticated MCP call is a 401 that points at the resource metadata",
+        mcpNoAuth.status === 401 && prmUrl === `http://127.0.0.1:${PORT}/api/.well-known/oauth-protected-resource`,
+        wwwAuth
+    );
+    const prm = await (await fetch(prmUrl)).json();
+    check(
+        "the resource metadata names /api/mcp and the gateway as its authorization server",
+        prm.resource === `${base}/mcp` && prm.authorization_servers?.[0] === base,
+        JSON.stringify(prm)
+    );
+    // The one discovery path of the three a client tries that reaches /api.
+    const asm = await (await fetch(`${base}/.well-known/openid-configuration`)).json();
+    check(
+        "authorization server metadata is served under /api, with PKCE S256 and registration",
+        asm.issuer === base &&
+            asm.token_endpoint === `${base}/oauth/token` &&
+            asm.registration_endpoint === `${base}/oauth/register` &&
+            asm.code_challenge_methods_supported?.includes("S256") &&
+            !!asm.jwks_uri,
+        JSON.stringify(asm).slice(0, 160)
     );
 
-    const [cloudWithMcp] = await send(mcpToken);
-    check("the MCP token cannot drive the Cloud API", cloudWithMcp.status === 401, `status=${cloudWithMcp.status}`);
+    // Where the platform's `/.well-known/*` → `/api/.well-known/:splat` redirect
+    // lands a client that rediscovers from the root without a fresh 401.
+    const mirroredPrm = await (await fetch(`${base}/.well-known/oauth-protected-resource/api/mcp`)).json().catch(() => null);
+    const mirroredAs = await (await fetch(`${base}/.well-known/oauth-authorization-server/api`)).json().catch(() => null);
+    check(
+        "discovery documents also answer at the root-style paths the platform redirect produces",
+        mirroredPrm?.resource === `${base}/mcp` && mirroredAs?.issuer === base
+    );
 
-    const mgmtWithMcp = await fetch(`${base}/mgmt/numbers`, { headers: { authorization: `Bearer ${mcpToken}` } });
-    check("the MCP token cannot reach the management API", mgmtWithMcp.status === 401, `status=${mgmtWithMcp.status}`);
+    const badReg = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://evil.example/cb"] }),
+    });
+    check("registration refuses a non-loopback http redirect", badReg.status === 400, `status=${badReg.status}`);
 
-    const mcpGet = await fetch(`${base}/mcp`, { headers: { authorization: `Bearer ${mcpToken}` } });
-    check("GET /api/mcp is a 405 (stateless), not a media lookup", mcpGet.status === 405, `status=${mcpGet.status}`);
+    const reg = await (
+        await fetch(`${base}/oauth/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ client_name: "Smoke Assistant", redirect_uris: [REDIRECT] }),
+        })
+    ).json();
+    const clientId = reg.client_id;
+    check("an assistant can register itself", !!clientId && reg.token_endpoint_auth_method === "none");
+
+    /** Start an authorization and return the approval request id the browser would land on. */
+    const startAuth = async (challenge, extra = {}) => {
+        const q = new URLSearchParams({
+            response_type: "code",
+            client_id: clientId,
+            redirect_uri: REDIRECT,
+            code_challenge: challenge,
+            code_challenge_method: "S256",
+            state: "st4te",
+            resource: `${base}/mcp`,
+            ...extra,
+        });
+        const r = await fetch(`${base}/oauth/authorize?${q}`, { redirect: "manual" });
+        const loc = r.headers.get("location") || "";
+        return { status: r.status, loc, request: new URL(loc, "http://x").searchParams.get("request") };
+    };
+
+    const noPkce = await startAuth("", { code_challenge_method: "plain" });
+    check(
+        "authorize without S256 PKCE bounces back with an error",
+        noPkce.status === 302 && noPkce.loc.startsWith(REDIRECT) && /error=invalid_request/.test(noPkce.loc),
+        noPkce.loc
+    );
+    const wrongRedirect = await fetch(
+        `${base}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent("https://other.example/cb")}`,
+        { redirect: "manual" }
+    );
+    check(
+        "authorize never redirects to an unregistered URI",
+        wrongRedirect.status === 400 && !wrongRedirect.headers.get("location"),
+        `status=${wrongRedirect.status}`
+    );
+
+    const p1 = pkce();
+    const a1 = await startAuth(p1.challenge);
+    check(
+        "authorize sends the browser to the sign-in page",
+        a1.status === 302 && a1.loc.startsWith(`http://127.0.0.1:${PORT}/authorize.html?request=`) && !!a1.request,
+        a1.loc
+    );
+
+    const reqNoKey = await fetch(`${base}/mgmt/oauth/requests/${a1.request}`);
+    check("the approval request needs the management key", reqNoKey.status === 401, `status=${reqNoKey.status}`);
+    const reqInfo = await (await mgmt(`/oauth/requests/${a1.request}`)).json();
+    check(
+        "the approval page is told who is asking and which numbers exist",
+        reqInfo.client?.name === "Smoke Assistant" &&
+            reqInfo.client?.redirectHost === "localhost:53682" &&
+            reqInfo.numbers?.some((n) => n.id === "alpha-bot")
+    );
+
+    const approveOff = await mgmt(`/oauth/requests/${a1.request}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ number: "alpha-bot" }),
+    });
+    check("a number with MCP off cannot be approved", approveOff.status === 400, `status=${approveOff.status}`);
+
+    await mgmt("/numbers/alpha-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) });
+    const approved = await (
+        await mgmt(`/oauth/requests/${a1.request}/approve`, { method: "POST", body: JSON.stringify({ number: "alpha-bot" }) })
+    ).json();
+    const back = new URL(approved.redirect || "http://x/");
+    const code1 = back.searchParams.get("code");
+    check(
+        "approving returns the client's redirect with a code, its state and our issuer",
+        approved.redirect?.startsWith(REDIRECT) && !!code1 && back.searchParams.get("state") === "st4te" && back.searchParams.get("iss") === base,
+        approved.redirect
+    );
+    const replayApprove = await mgmt(`/oauth/requests/${a1.request}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ number: "alpha-bot" }),
+    });
+    check("an approval request answers only once", replayApprove.status === 404, `status=${replayApprove.status}`);
+
+    const badVerifier = await tokenPost({
+        grant_type: "authorization_code",
+        code: code1,
+        redirect_uri: REDIRECT,
+        client_id: clientId,
+        code_verifier: pkce().verifier,
+    });
+    check(
+        "a wrong PKCE verifier is refused",
+        badVerifier.status === 400 && (await badVerifier.json()).error === "invalid_grant",
+        `status=${badVerifier.status}`
+    );
+    const afterBad = await tokenPost({
+        grant_type: "authorization_code",
+        code: code1,
+        redirect_uri: REDIRECT,
+        client_id: clientId,
+        code_verifier: p1.verifier,
+    });
+    check("…and that burns the code (single use)", afterBad.status === 400, `status=${afterBad.status}`);
+
+    // A clean second round to get tokens.
+    const p2 = pkce();
+    const a2 = await startAuth(p2.challenge);
+    const ok2 = await (
+        await mgmt(`/oauth/requests/${a2.request}/approve`, { method: "POST", body: JSON.stringify({ number: "alpha-bot" }) })
+    ).json();
+    const tokRes = await tokenPost({
+        grant_type: "authorization_code",
+        code: new URL(ok2.redirect).searchParams.get("code"),
+        redirect_uri: REDIRECT,
+        client_id: clientId,
+        code_verifier: p2.verifier,
+    });
+    const tok = await tokRes.json();
+    check(
+        "the code exchanges for an access and a refresh token",
+        tokRes.status === 200 && tok.token_type === "Bearer" && !!tok.access_token && !!tok.refresh_token && tok.expires_in > 0,
+        `status=${tokRes.status}`
+    );
+    mcpToken = tok.access_token;
 
     const initRes = await mcpPost(mcpToken, init);
     const initJson = await initRes.json().catch(() => null);
     check(
-        "MCP initialize answers with the server's identity",
+        "MCP initialize works with the access token",
         initRes.status === 200 && initJson?.result?.serverInfo?.name === "whatsapp",
         `status=${initRes.status}`
     );
-
     const listRes = await (await mcpPost(mcpToken, rpc("tools/list", {}, 2))).json().catch(() => null);
     const toolNames = (listRes?.result?.tools || []).map((t) => t.name);
     const expected = [
@@ -621,7 +775,6 @@ try {
         expected.every((n) => toolNames.includes(n)),
         `missing: ${expected.filter((n) => !toolNames.includes(n)).join(",") || "none"}`
     );
-
     const callRes = await (
         await mcpPost(mcpToken, rpc("tools/call", { name: "list_chats", arguments: {} }, 3))
     ).json().catch(() => null);
@@ -630,7 +783,6 @@ try {
         callRes?.result?.content?.[0]?.text === "No chats seen yet.",
         JSON.stringify(callRes?.result || callRes?.error).slice(0, 120)
     );
-
     const sendRes = await (
         await mcpPost(mcpToken, rpc("tools/call", { name: "send_message", arguments: { to: "40700000000", text: "x" } }, 4))
     ).json().catch(() => null);
@@ -640,24 +792,100 @@ try {
         JSON.stringify(sendRes?.result || sendRes?.error).slice(0, 120)
     );
 
-    const rotatedMcp = await (await mgmt("/numbers/alpha-bot/rotate-mcp-token", { method: "POST" })).json();
-    const oldMcp = await mcpPost(mcpToken, init);
-    const newMcp = await mcpPost(rotatedMcp.mcpToken, init);
+    const mcpBotToken = await mcpPost(tokenA, init);
+    const mcpBotTokenJson = await mcpBotToken.json();
     check(
-        "rotating the MCP token revokes the old one and the new one works",
-        oldMcp.status === 401 && newMcp.status === 200 && rotatedMcp.mcpToken !== mcpToken,
-        `old=${oldMcp.status} new=${newMcp.status}`
+        "MCP rejects the bot token, and says so",
+        mcpBotToken.status === 401 && /bot token/.test(mcpBotTokenJson?.error?.message || ""),
+        `status=${mcpBotToken.status}`
     );
-    mcpToken = rotatedMcp.mcpToken;
-    const [stillBot] = await send(tokenA);
-    check("rotating the MCP token leaves the bot token alone", stillBot.status === 502, `status=${stillBot.status}`);
+    const [cloudWithMcp] = await send(mcpToken);
+    check("an MCP access token cannot drive the Cloud API", cloudWithMcp.status === 401, `status=${cloudWithMcp.status}`);
+    const mgmtWithMcp = await fetch(`${base}/mgmt/numbers`, { headers: { authorization: `Bearer ${mcpToken}` } });
+    check("an MCP access token cannot reach the management API", mgmtWithMcp.status === 401, `status=${mgmtWithMcp.status}`);
+    const mcpGet = await fetch(`${base}/mcp`, { headers: { authorization: `Bearer ${mcpToken}` } });
+    check("GET /api/mcp is a 405 (stateless), not a media lookup", mcpGet.status === 405, `status=${mcpGet.status}`);
 
-    // Off revokes; on again mints a fresh one. second-bot proves it, so alpha-bot
-    // keeps its token for the restart check below.
-    const onB = await (await mgmt("/numbers/second-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
+    const listed = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "alpha-bot");
+    check(
+        "the console lists the connected assistant",
+        listed?.mcpClients?.length === 1 && listed.mcpClients[0].name === "Smoke Assistant",
+        JSON.stringify(listed?.mcpClients)
+    );
+
+    // Refresh rotates: the new pair works, the old refresh token is spent.
+    const refreshed = await (
+        await tokenPost({ grant_type: "refresh_token", refresh_token: tok.refresh_token, client_id: clientId })
+    ).json();
+    const reuse = await tokenPost({ grant_type: "refresh_token", refresh_token: tok.refresh_token, client_id: clientId });
+    const viaRefreshed = await mcpPost(refreshed.access_token, init);
+    check(
+        "refresh issues a working token and spends the old refresh token",
+        !!refreshed.access_token && viaRefreshed.status === 200 && reuse.status === 400,
+        `refreshed=${viaRefreshed.status} reuse=${reuse.status}`
+    );
+    const stillOne = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "alpha-bot");
+    check("refreshing does not count as a second assistant", stillOne?.mcpClients?.length === 1);
+
+    const disc = await (await mgmt("/numbers/alpha-bot/disconnect-mcp", { method: "POST" })).json();
+    const afterDisc = await mcpPost(refreshed.access_token, init);
+    check(
+        "disconnecting revokes the assistant at once",
+        disc.disconnected > 0 && afterDisc.status === 401,
+        `status=${afterDisc.status}`
+    );
+
+    // One more approval, kept for the restart check below — and turning MCP
+    // off on second-bot proves off revokes.
+    const p3 = pkce();
+    const a3 = await startAuth(p3.challenge);
+    const ok3 = await (
+        await mgmt(`/oauth/requests/${a3.request}/approve`, { method: "POST", body: JSON.stringify({ number: "alpha-bot" }) })
+    ).json();
+    mcpToken = (
+        await (
+            await tokenPost({
+                grant_type: "authorization_code",
+                code: new URL(ok3.redirect).searchParams.get("code"),
+                redirect_uri: REDIRECT,
+                client_id: clientId,
+                code_verifier: p3.verifier,
+            })
+        ).json()
+    ).access_token;
+
+    await mgmt("/numbers/second-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) });
+    const p4 = pkce();
+    const a4 = await startAuth(p4.challenge);
+    const ok4 = await (
+        await mgmt(`/oauth/requests/${a4.request}/approve`, { method: "POST", body: JSON.stringify({ number: "second-bot" }) })
+    ).json();
+    const tokB = await (
+        await tokenPost({
+            grant_type: "authorization_code",
+            code: new URL(ok4.redirect).searchParams.get("code"),
+            redirect_uri: REDIRECT,
+            client_id: clientId,
+            code_verifier: p4.verifier,
+        })
+    ).json();
     await mgmt("/numbers/second-bot", { method: "PATCH", body: JSON.stringify({ mcp: false }) });
-    const offB = await mcpPost(onB.number?.mcpToken, init);
-    check("turning MCP off revokes its token", offB.status === 401, `status=${offB.status}`);
+    const offB = await mcpPost(tokB.access_token, init);
+    const refreshOffB = await tokenPost({ grant_type: "refresh_token", refresh_token: tokB.refresh_token, client_id: clientId });
+    check(
+        "turning MCP off revokes its access and refresh tokens",
+        offB.status === 401 && refreshOffB.status === 400,
+        `access=${offB.status} refresh=${refreshOffB.status}`
+    );
+
+    const deniedP = pkce();
+    const aDeny = await startAuth(deniedP.challenge);
+    const denied = await (await mgmt(`/oauth/requests/${aDeny.request}/deny`, { method: "POST" })).json();
+    check(
+        "denying sends the client access_denied with its state",
+        /error=access_denied/.test(denied.redirect || "") && /state=st4te/.test(denied.redirect || ""),
+        denied.redirect
+    );
 
     check("no webhook fired while unpaired", hits.a === 0 && hits.b === 0, `a=${hits.a} b=${hits.b}`);
 } finally {
@@ -693,7 +921,7 @@ try {
         },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
     });
-    check("the MCP token still works after the restart", mcpAfter.status === 200, `status=${mcpAfter.status}`);
+    check("an MCP access token still works after the restart", mcpAfter.status === 200, `status=${mcpAfter.status}`);
 
     // Deleting must take the credentials with it: a leftover auth document means
     // recreating the id later silently adopts a dead account's device slot.

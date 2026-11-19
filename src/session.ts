@@ -202,13 +202,9 @@ export class Session {
      * updatable at all: it namespaces the stored credentials, so changing it
      * would orphan them.
      */
-    /** MCP access is on exactly when an MCP token exists. */
+    /** MCP access on: assistants may be approved, and the chat index is kept. */
     get mcpEnabled(): boolean {
-        return !!this.cfg.mcpToken;
-    }
-
-    get mcpToken(): string | undefined {
-        return this.cfg.mcpToken;
+        return !!this.cfg.mcp;
     }
 
     applyConfig(cfg: SessionConfig) {
@@ -2483,7 +2479,6 @@ export class Session {
             rejectCalls: !!this.cfg.rejectCalls,
             typingEvents: !!this.cfg.typingEvents,
             mcpEnabled: this.mcpEnabled,
-            mcpToken: this.cfg.mcpToken ?? null,
             me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,

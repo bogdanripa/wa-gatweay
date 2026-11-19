@@ -140,18 +140,25 @@ And the management API behind the console, all of it requiring `Authorization: B
 | `POST /api/mgmt/numbers` | add one; returns its generated token |
 | `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap, `rejectCalls`, `typingEvents`, `mcp` |
 | `POST /api/mgmt/numbers/:id/rotate-token` | issue a new bot token, revoking the old |
-| `POST /api/mgmt/numbers/:id/rotate-mcp-token` | issue a new MCP token, revoking the old |
+| `POST /api/mgmt/numbers/:id/disconnect-mcp` | revoke every assistant approved for the number |
+| `GET /api/mgmt/oauth/requests/:id`, `POST …/approve`, `POST …/deny` | what the sign-in page calls to answer an assistant's OAuth request |
 | `POST /api/mgmt/numbers/:id/relink` | unlink from WhatsApp and show a fresh QR |
 | `POST /api/mgmt/numbers/:id/restart` | bounce the socket, keeping credentials |
 | `DELETE /api/mgmt/numbers/:id` | remove the number and purge its state |
 
 ### MCP: a number as an assistant's tool
 
-A number with **MCP access** on (console checkbox, or `PATCH … { "mcp": true }`) is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `POST /api/mcp`, so an assistant can read and write *as that account* — meant for linking your own number, not a bot's. It has its own token, separate from the bot token; neither opens the other's surface, and turning MCP off revokes it.
+A number with **MCP access** on (console checkbox, or `PATCH … { "mcp": true }`) is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `POST /api/mcp`, so an assistant can read and write *as that account* — meant for linking your own number, not a bot's.
+
+Access is **OAuth 2.1**, as the MCP spec describes it. Add the URL as a custom connector in Claude, or:
 
 ```bash
-claude mcp add --transport http whatsapp https://<host>/api/mcp --header 'Authorization: Bearer <MCP token>'
+claude mcp add --transport http whatsapp https://<host>/api/mcp
 ```
+
+The assistant registers itself (dynamic client registration), then opens `/authorize.html`. There you enter the management key (skipped when the console is already unlocked in that browser), pick the number, and approve. It gets a one-hour access token for that number and a rotating 90-day refresh token. The console lists connected assistants; **Disconnect assistants** revokes them, and turning MCP off for the number revokes everything. Bot tokens never open `/api/mcp`, and MCP tokens never open the Cloud API or `/api/mgmt`.
+
+**One platform rule is required:** a redirect `/.well-known/*` → `/api/.well-known/:splat` (302). The static site owns the root, and a client that rediscovers without a fresh 401 starts at the root well-known paths; without the rule it decides the origin itself is the authorization server and fails. `dev/serve.mjs` mirrors it.
 
 Tools: `list_chats`, `search_contacts`, `read_chat`, `search_chat`, `get_media`, `group_info`, `check_number`, `send_message` (with `reply_to`), `send_media`, `react`, `mark_read`, `edit_message`, `delete_message`.
 

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { logger } from "./log.js";
 import { Session } from "./session.js";
 import type { SessionManager } from "./sessions.js";
+import { resourceMetadataUrlOf, type OAuthService } from "./oauth.js";
 import type { ChatDoc } from "./store.js";
 import type { CloudSendKind } from "./cloud.js";
 import { decodeCursor, describeMessage, encodeCursor } from "./chatlog.js";
@@ -19,8 +20,10 @@ import { isGroupJid, toWaJid } from "./jid.js";
  * This is a different thing from the Cloud API surface and deliberately kept
  * apart from it. That one is a compatibility contract with bots we cannot see;
  * this one is a tool surface for a person's own assistant, opt-in per number
- * and behind its own token (`mcpToken`), so a bot token can never open it and
- * an MCP token can never drive the bot API.
+ * and authorised by OAuth (`oauth.ts`): an assistant signs in once, the
+ * operator approves it for one number, and it holds a token for that number
+ * only. A bot token can never open it and an MCP token can never drive the
+ * bot API.
  *
  * It keeps no message history. WhatsApp's servers have none and offer no
  * search, so reading or searching a chat asks the phone for pages of history
@@ -431,7 +434,7 @@ export function buildMcpServer(session: Session): McpServer {
     return server;
 }
 
-export function makeMcpRouter(manager: SessionManager): Router {
+export function makeMcpRouter(manager: SessionManager, oauth: OAuthService): Router {
     const router = Router();
 
     const jsonRpcError = (res: Response, status: number, message: string) =>
@@ -439,20 +442,32 @@ export function makeMcpRouter(manager: SessionManager): Router {
 
     router.all("/mcp", async (req: Request, res: Response) => {
         const token = bearerOf(req);
-        const session = manager.byMcpTokenOrNull(token);
+        const session = await oauth.sessionForAccessToken(token).catch(() => null);
         if (!session) {
             // The commonest mistake is pasting the bot token, so say which one
             // this is — the token itself is never logged.
             const isBotToken = !!token && !!manager.byTokenOrNull(token);
             logger.warn(
-                { path: req.path, reason: !token ? "no bearer token" : isBotToken ? "bot token sent to MCP" : "unknown MCP token" },
+                {
+                    path: req.path,
+                    reason: !token ? "no bearer token" : isBotToken ? "bot token sent to MCP" : "access token unknown or expired",
+                },
                 "request refused"
+            );
+            // This header is how a client finds the sign-in: it points at the
+            // resource metadata, which names the authorization server. Without
+            // it a client has nowhere to start, since the root well-known paths
+            // belong to the static site, not to this container.
+            res.setHeader(
+                "www-authenticate",
+                `Bearer resource_metadata="${resourceMetadataUrlOf(req)}"` +
+                    (token ? `, error="invalid_token"` : "")
             );
             jsonRpcError(
                 res,
                 401,
                 isBotToken
-                    ? "that is the number's bot token — MCP has its own token, shown in the console once MCP access is on"
+                    ? "that is the number's bot token — MCP signs in with OAuth; connect your assistant to this URL and approve it"
                     : "unauthorized"
             );
             return;

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Connect an assistant — wa-gateway</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body.authorize { max-width: 520px; }
+  .who { font-size: 1.05rem; margin: 0 0 .5rem; }
+  .who strong { overflow-wrap: anywhere; }
+  .can { margin: .25rem 0 1rem; padding-left: 1.2rem; }
+  .can li { margin-bottom: .2rem; }
+  .numbers { display: flex; flex-direction: column; gap: .5rem; margin: 0 0 1rem; }
+  .numbers label.check.off { opacity: .55; cursor: default; }
+  .numbers label.check.off:hover { border-color: var(--border); }
+  .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .actions button { flex: 1 1 8rem; }
+</style>
+</head>
+<body class="authorize">
+
+<!--
+  The OAuth approval screen for /api/mcp.
+
+  An assistant's sign-in lands here with ?request=<id> (from /api/oauth/authorize).
+  Approving needs the management key — the same one the console uses, read from
+  the same local storage, so a browser that has the console unlocked only has to
+  pick a number. The page calls the management API, which issues the code and
+  answers with the URL to send the browser back to.
+
+  Nothing is ever approved without a click: an assistant can start a request,
+  but only someone holding the key and looking at this page can finish one.
+-->
+
+<header>
+  <h1><a href="/">wa-gateway</a> <span class="crumb">connect an assistant</span></h1>
+</header>
+
+<section id="loading"><p class="muted">Loading…</p></section>
+
+<section id="signin" hidden>
+  <h2>Sign in</h2>
+  <p class="muted">An assistant wants to use one of the WhatsApp numbers on this gateway. Enter the management key to continue.</p>
+  <form id="signin-form">
+    <input id="key" type="password" placeholder="Management key" autocomplete="current-password" spellcheck="false" required>
+    <button type="submit">Continue</button>
+  </form>
+  <p id="signin-error" class="error" hidden></p>
+</section>
+
+<section id="consent" hidden>
+  <p class="who"><strong id="client-name"></strong> wants to use WhatsApp as one of your numbers.</p>
+  <p class="muted">It will be able to:</p>
+  <ul class="can muted">
+    <li>see your chat list and contact names</li>
+    <li>read and search conversations (fetched from your phone, not stored)</li>
+    <li>send, edit and delete messages, react, and mark chats read — as you</li>
+  </ul>
+  <form id="consent-form">
+    <div id="numbers" class="numbers" role="radiogroup" aria-label="Number"></div>
+    <p id="none" class="warn-box" hidden>
+      No number has MCP access on yet. Turn it on for a number in the
+      <a href="/console.html" target="_blank" rel="noopener">console</a>, then reload this page.
+    </p>
+    <div class="actions">
+      <button type="button" id="deny" class="ghost">Deny</button>
+      <button type="submit" id="allow">Allow</button>
+    </div>
+  </form>
+  <p class="muted">You'll be sent back to <code id="redirect-host"></code>. Disconnect it any time from the console.</p>
+  <p id="consent-error" class="error" hidden></p>
+</section>
+
+<section id="done" hidden>
+  <h2 id="done-title"></h2>
+  <p id="done-text" class="muted"></p>
+</section>
+
+<script>
+  // Never inside someone else's frame: this page approves access with one click.
+  if (window.top !== window.self) {
+    document.body.textContent = "";
+    throw new Error("framed");
+  }
+
+  const KEY_STORAGE = "wa-gateway:key"; // shared with the console
+  const $ = (s) => document.querySelector(s);
+  const requestId = new URLSearchParams(location.search).get("request") || "";
+  let key = "";
+  try { key = localStorage.getItem(KEY_STORAGE) || ""; } catch {}
+
+  function show(id) {
+    for (const s of ["#loading", "#signin", "#consent", "#done"]) $(s).hidden = s !== id;
+  }
+  function finish(title, text) {
+    $("#done-title").textContent = title;
+    $("#done-text").textContent = text;
+    show("#done");
+  }
+
+  async function api(path, options = {}) {
+    const res = await fetch("/api/mgmt" + path, {
+      ...options,
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}`, ...(options.headers || {}) },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data?.error?.message || `request failed (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  function render(info) {
+    $("#client-name").textContent = info.client.name;
+    $("#redirect-host").textContent = info.client.redirectHost;
+    const list = $("#numbers");
+    list.replaceChildren();
+    const usable = info.numbers.filter((n) => n.mcpEnabled);
+    for (const n of info.numbers) {
+      const label = document.createElement("label");
+      label.className = "check" + (n.mcpEnabled ? "" : " off");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "number";
+      input.value = n.id;
+      input.disabled = !n.mcpEnabled;
+      input.checked = n.mcpEnabled && usable.length === 1;
+      const title = document.createElement("span");
+      title.textContent = n.name ? `${n.name} (${n.id})` : n.id;
+      const small = document.createElement("small");
+      small.textContent = [
+        n.phone ? `+${n.phone}` : "not linked yet",
+        n.status === "connected" ? null : n.status,
+        n.mcpEnabled ? null : "MCP access off",
+      ].filter(Boolean).join(" · ");
+      label.append(input, title, small);
+      list.append(label);
+    }
+    $("#none").hidden = usable.length > 0;
+    $("#allow").disabled = usable.length === 0;
+    show("#consent");
+  }
+
+  async function load() {
+    if (!requestId) return finish("Nothing to approve", "Start connecting from your assistant; it will bring you here.");
+    if (!key) return show("#signin");
+    try {
+      render(await api(`/oauth/requests/${encodeURIComponent(requestId)}`));
+    } catch (e) {
+      if (e.status === 401) {
+        key = "";
+        $("#signin-error").textContent = "That key was not accepted.";
+        $("#signin-error").hidden = false;
+        return show("#signin");
+      }
+      if (e.status === 404) return finish("This request has expired", e.message);
+      if (e.status === 429) return finish("Too many attempts", "Wait a few minutes and start again from your assistant.");
+      finish("Something went wrong", e.message);
+    }
+  }
+
+  $("#signin-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    key = $("#key").value.trim();
+    $("#signin-error").hidden = true;
+    // Remembered like the console does, so the next approval is one click.
+    try { localStorage.setItem(KEY_STORAGE, key); } catch {}
+    show("#loading");
+    load();
+  });
+
+  async function answer(path, body) {
+    $("#allow").disabled = $("#deny").disabled = true;
+    $("#consent-error").hidden = true;
+    try {
+      const { redirect } = await api(path, { method: "POST", body: JSON.stringify(body || {}) });
+      finish("Returning to the assistant…", "If nothing happens, you can close this tab.");
+      location.assign(redirect);
+    } catch (e) {
+      if (e.status === 404) return finish("This request has expired", e.message);
+      $("#consent-error").textContent = e.message;
+      $("#consent-error").hidden = false;
+      $("#allow").disabled = $("#deny").disabled = false;
+    }
+  }
+
+  $("#consent-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const picked = new FormData(e.currentTarget).get("number");
+    if (!picked) {
+      $("#consent-error").textContent = "Pick the number it should use.";
+      $("#consent-error").hidden = false;
+      return;
+    }
+    answer(`/oauth/requests/${encodeURIComponent(requestId)}/approve`, { number: picked });
+  });
+  $("#deny").addEventListener("click", () => answer(`/oauth/requests/${encodeURIComponent(requestId)}/deny`));
+
+  load();
+</script>
+</body>
+</html>

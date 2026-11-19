@@ -99,7 +99,13 @@ What *is* kept is a pointer: `rememberKey` stores the message proto for an inbou
 
 `GET /api/<MEDIA_ID>` is registered **last** on the API router because it claims the whole single-segment GET space, which is where Meta puts it; its auth is inline rather than in the router's middleware list so a mistyped path still 404s instead of 401ing. Both it and `/api/documents/<MEDIA_ID>` require the session token — a document is fetched by the bot itself, so unlike a media link it can be protected properly.
 
-**MCP keeps no message history, and that is the design, not a gap.** `/api/mcp` (`mcp.ts`) turns a number into an assistant's tool surface — read and send as that account. It is deliberately *not* part of the consumer contract above: opt-in per number, its own `mcpToken`, and neither token opens the other's surface (a bot token on `/api/mcp` is refused by name, an MCP token on the Cloud API is a plain 401). Turning it off deletes the token *and* purges `chats`/`contacts` (`purgeMcpState`).
+**MCP keeps no message history, and that is the design, not a gap.** `/api/mcp` (`mcp.ts`) turns a number into an assistant's tool surface — read and send as that account. It is deliberately *not* part of the consumer contract above: opt-in per number (`mcp: true`), authorised by OAuth, and neither credential opens the other's surface (a bot token on `/api/mcp` is refused by name, an MCP access token on the Cloud API or `/api/mgmt` is a plain 401). Turning it off revokes every grant *and* purges `chats`/`contacts` (`purgeMcpState`).
+
+**MCP auth is OAuth 2.1 and the gateway is its own authorization server** (`oauth.ts`; the security rules — PKCE, redirect URIs — are pure in `oauthRules.ts`). The operator's only credential is the management key, so "signing in" is that key on the static `/authorize.html`, which calls `/api/mgmt/oauth/requests/:id/approve` — the code is issued behind the key, never by the public OAuth routes. Things that will bite:
+- **Discovery has to survive the `/api`-only routing.** The 401 carries `WWW-Authenticate: Bearer resource_metadata="…/api/.well-known/oauth-protected-resource"`; drop that header and no client can find the sign-in. The issuer is `https://host/api`, and the one client-tried metadata path under `/api` is OIDC-style `/api/.well-known/openid-configuration` — hence the OIDC-shaped document with inert `jwks_uri`/id_token fields. A client rediscovering *without* a 401 starts at root `/.well-known/…`, which only works because of a **Pironman redirect rule** `/.well-known/*` → `/api/.well-known/:splat`; the router answers at those mirrored paths. That rule lives in the platform, not this repo — losing it presents as "the assistant forgot its registration" (the SDK binds a client to the issuer it discovered and discards it on mismatch).
+- Never redirect on an unverified `client_id`/`redirect_uri` — those errors are shown, not sent back (open redirector). Codes, requests and refresh tokens are single-use (`findOneAndDelete` before validating, so a failed PKCE check still burns the code). Everything is stored as SHA-256 of the secret.
+- Registration is open (every MCP client self-registers) and throttled per IP; it grants nothing until approved. Unused clients age out after 180 days.
+- `authorize.html` frame-busts and never auto-approves, even with the key remembered.
 
 WhatsApp's servers hold no history and offer no search, so there is nothing to "call" for a search. `read_chat`/`search_chat` ask the **phone** for history with `fetchMessageHistory` (an ON_DEMAND peer request: ≤50 messages older than a given key), answer from that, and keep the result only in the bounded in-memory `Session.fetched` map so a model can react to or quote what it just read. Don't add a messages collection to make search faster — "metadata, never content" was chosen over that explicitly. What Mongo holds for MCP is the chat list (`ChatDoc`: name, last activity, unread, and `anchor`, the newest key per chat, which is the only thing a history request can start from) and names (`ContactDoc`).
 
@@ -129,7 +135,9 @@ Inbound image/GIF/voice downloads now happen only when the number has a webhook 
 | `media.ts` | download, decrypt, serve, sweep |
 | `webhook.ts` | serialised at-least-once delivery, one queue per session |
 | `routes.ts` | Cloud API send, groups, health/media, management API |
-| `mcp.ts` | `/api/mcp` — MCP tools over one number, stateless, own token |
+| `mcp.ts` | `/api/mcp` — MCP tools over one number, stateless, OAuth-protected |
+| `oauth.ts` | OAuth 2.1 server for MCP: discovery, registration, authorize, token, revoke |
+| `oauthRules.ts` | **pure** — PKCE, redirect-URI and response-URL rules |
 | `chatlog.ts` | **pure** — reading a message for a model, search folding, history cursors |
 | `alerts.ts` | Telegram connection alerts, deliberately debounced |
 | `frontend/` | the console — plain HTML/CSS/JS, no build step |
@@ -137,13 +145,13 @@ Inbound image/GIF/voice downloads now happen only when the number has a webhook 
 
 `.github/workflows/deploy.yml` is generated by `apps_deploy_workflow` and should stay verbatim, with **one** deliberate deviation: its health-wait retries `500` as well. The app runs one container at a time (two would fight over the WhatsApp device slot), so a deploy has a real gap where the edge answers 500 — and without that, every successful deploy reports failure. Regenerating the file silently removes it.
 
-`jid.ts`, `map.ts` and `chatlog.ts` are pure on purpose — all I/O is injected by `session.ts` so both stay unit-testable without a socket. Keep them that way.
+`jid.ts`, `map.ts`, `chatlog.ts` and `oauthRules.ts` are pure on purpose — all I/O is injected by `session.ts` so both stay unit-testable without a socket. Keep them that way.
 
 ## Testing
 
 ```bash
-npm run build && npm test          # 110 unit tests, pure mappers, Cloud shapes, chatlog
-npm run test:smoke                 # 87 boot checks, real mongod, two numbers, MCP auth/tools
+npm run build && npm test          # 114 unit tests, pure mappers, Cloud shapes, chatlog, OAuth rules
+npm run test:smoke                 # 103 boot checks, real mongod, two numbers, full MCP OAuth flow
                                    # SMOKE_PORT=9791 … if 8791-8793 are taken
 npm run dev:console                # the console on http://127.0.0.1:8080
 ```

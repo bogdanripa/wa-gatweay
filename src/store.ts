@@ -30,12 +30,13 @@ export interface SessionDoc {
     /** Send `presence` events (typing / recording / paused) for 1:1 chats. Absent means none. */
     typingEvents?: boolean;
     /**
-     * Bearer token for `/api/mcp`, present exactly when MCP access is on.
-     *
-     * Separate from `token` on purpose: the bot token drives one bot's replies,
-     * this one lets a model read the chat list and act as the account. Turning
-     * MCP off deletes it, which is the revocation.
+     * MCP access on. It is a permission, not a credential: assistants get their
+     * access through OAuth (`oauth.ts`), and only numbers with this on can be
+     * picked when approving one. Turning it off revokes every grant for the
+     * number and forgets its chat index.
      */
+    mcp?: boolean;
+    /** @deprecated The pre-OAuth static MCP token. Migrated to `mcp: true` and removed on load. */
     mcpToken?: string;
     /**
      * The analogue of Meta's `phone_number_id`: a stable, numeric, per-number
@@ -174,6 +175,45 @@ export interface ContactDoc {
     updatedAt: Date;
 }
 
+/** An OAuth client an assistant registered for itself (RFC 7591). Public: no secret, PKCE instead. */
+export interface OAuthClientDoc {
+    /** The client_id: random, unguessable, issued here. */
+    _id: string;
+    clientName?: string;
+    redirectUris: string[];
+    createdAt: Date;
+    /** Registration is open, so unused clients age out (TTL); every grant refreshes this. */
+    lastUsedAt: Date;
+}
+
+/**
+ * Every short-lived OAuth artefact in one collection, told apart by `kind`:
+ * a pending authorization `request`, an authorization `code`, an `access`
+ * token, a `refresh` token. Keyed by the SHA-256 of the secret, so a leaked
+ * database is not a set of working credentials; `expiresAt` carries a TTL index.
+ */
+export interface OAuthGrantDoc {
+    /** hex SHA-256 of the secret itself (request id, code or token). */
+    _id: string;
+    kind: "request" | "code" | "access" | "refresh";
+    clientId: string;
+    /** The number this grant acts as. Absent on a request that has not been approved yet. */
+    sessionId?: string;
+    redirectUri: string;
+    /** request/code only: PKCE S256 challenge and the client's state. */
+    codeChallenge?: string;
+    state?: string;
+    scope?: string;
+    /** access/refresh: one per approval, kept across refresh rotation — what "connected assistant" means. */
+    familyId?: string;
+    /** Denormalised for the console's list of connected assistants. */
+    clientName?: string;
+    /** When the family was approved. */
+    approvedAt?: Date;
+    expiresAt: Date;
+    createdAt: Date;
+}
+
 /** Downloaded media, served back over HTTP so the bots can fetch it. */
 export interface MediaDoc {
     _id: string;
@@ -193,6 +233,8 @@ export interface Stores {
     media: Collection<MediaDoc>;
     chats: Collection<ChatDoc>;
     contacts: Collection<ContactDoc>;
+    oauthClients: Collection<OAuthClientDoc>;
+    oauthGrants: Collection<OAuthGrantDoc>;
     close: () => Promise<void>;
 }
 
@@ -211,6 +253,8 @@ export async function connectStores(): Promise<Stores> {
     const media = db.collection<MediaDoc>("media");
     const chats = db.collection<ChatDoc>("chats");
     const contacts = db.collection<ContactDoc>("contacts");
+    const oauthClients = db.collection<OAuthClientDoc>("oauth_clients");
+    const oauthGrants = db.collection<OAuthGrantDoc>("oauth_grants");
 
     const index = (p: Promise<unknown>, what: string) =>
         p.catch((e) => logger.warn({ e }, `index: ${what}`));
@@ -249,6 +293,15 @@ export async function connectStores(): Promise<Stores> {
     // The chat list is read newest-first, per number.
     await index(chats.createIndex({ sessionId: 1, lastMessageAt: -1 }), "chats recency");
     await index(contacts.createIndex({ sessionId: 1 }), "contacts sessionId");
+    // Each grant carries its own expiry; Mongo sweeps about once a minute, so
+    // reads check `expiresAt` too.
+    await index(oauthGrants.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }), "oauth_grants TTL");
+    await index(oauthGrants.createIndex({ sessionId: 1, kind: 1 }), "oauth_grants session");
+    await index(oauthGrants.createIndex({ familyId: 1 }), "oauth_grants family");
+    await index(
+        oauthClients.createIndex({ lastUsedAt: 1 }, { expireAfterSeconds: 180 * 24 * 3600 }),
+        "oauth_clients TTL"
+    );
 
     logger.info({ db: db.databaseName }, "mongo connected");
 
@@ -262,6 +315,8 @@ export async function connectStores(): Promise<Stores> {
         media,
         chats,
         contacts,
+        oauthClients,
+        oauthGrants,
         close: () => client.close(),
     };
 }

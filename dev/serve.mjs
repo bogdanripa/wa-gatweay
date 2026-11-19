@@ -54,11 +54,28 @@ const proxy = createServer(async (req, res) => {
                 method: req.method,
                 headers: { ...req.headers, host: `127.0.0.1:${UPSTREAM}` },
                 body: chunks.length ? Buffer.concat(chunks) : undefined,
+                // Handed to the browser, not followed here: the OAuth authorize
+                // step is a 302 to /authorize.html, which has to land in the
+                // browser's address bar, as it does behind the real proxy.
+                redirect: "manual",
             });
+            const passThrough = ["location", "www-authenticate", "cache-control"];
             res.writeHead(upstream.status, {
                 "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+                ...Object.fromEntries(
+                    passThrough.filter((h) => upstream.headers.has(h)).map((h) => [h, upstream.headers.get(h)])
+                ),
             });
             res.end(Buffer.from(await upstream.arrayBuffer()));
+            return;
+        }
+
+        // The platform redirect rule OAuth discovery depends on (see oauth.ts):
+        // root well-known paths belong to the static site, so they are sent to
+        // the container's copies under /api.
+        if (req.url.startsWith("/.well-known/")) {
+            res.writeHead(307, { location: `/api${req.url}` });
+            res.end();
             return;
         }
 

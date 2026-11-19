@@ -7,6 +7,7 @@ import { logger } from "./log.js";
 import type { Session } from "./session.js";
 import type { SessionManager } from "./sessions.js";
 import type { MediaStore } from "./media.js";
+import type { OAuthService } from "./oauth.js";
 import { NotFoundError, ValidationError, normaliseId } from "./sessionStore.js";
 import {
     CloudRequestError,
@@ -339,7 +340,7 @@ export function makeGatewayRouter(manager: SessionManager, media: MediaStore): R
  * failures from one address are throttled, and nothing here is reachable with a
  * session token (a compromised bot must not be able to enumerate the others).
  */
-export function makeManagementRouter(manager: SessionManager): Router {
+export function makeManagementRouter(manager: SessionManager, oauth: OAuthService): Router {
     const router = Router();
 
     // Fail closed when unconfigured. A gateway with no key must not be
@@ -426,6 +427,7 @@ export function makeManagementRouter(manager: SessionManager): Router {
         return {
             ...rest,
             qrDataUrl: qr ? await QRCode.toDataURL(qr, { margin: 2, width: 320 }) : undefined,
+            mcpClients: session.mcpEnabled ? await oauth.connectedClients(session.id) : [],
         };
     }
 
@@ -472,10 +474,41 @@ export function makeManagementRouter(manager: SessionManager): Router {
         }
     });
 
-    router.post("/numbers/:id/rotate-mcp-token", async (req, res) => {
+    router.post("/numbers/:id/disconnect-mcp", async (req, res) => {
         try {
-            const doc = await manager.rotateMcpToken(normaliseId(req.params.id));
-            res.json({ mcpToken: doc.mcpToken });
+            const id = normaliseId(req.params.id);
+            if (!manager.byIdOrNull(id)) throw new NotFoundError(`no number with id "${id}"`);
+            res.json({ disconnected: await oauth.disconnectAll(id) });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    // --- OAuth approval -----------------------------------------------------
+    //
+    // The sign-in page (`/authorize.html`) is static; these are what it calls.
+    // They sit behind the management key on purpose: approving an assistant
+    // hands it a number, which is exactly the power that key represents.
+
+    router.get("/oauth/requests/:id", async (req, res) => {
+        try {
+            res.json(await oauth.describeRequest(req.params.id));
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/oauth/requests/:id/approve", async (req, res) => {
+        try {
+            res.json({ redirect: await oauth.approve(req.params.id, String(req.body?.number || ""), req) });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/oauth/requests/:id/deny", async (req, res) => {
+        try {
+            res.json({ redirect: await oauth.deny(req.params.id, req) });
         } catch (e) {
             fail(res, e);
         }

@@ -54,8 +54,8 @@ export interface SessionConfig {
     rejectCalls?: boolean;
     /** Watch the presence of people who write 1:1 and send the bot a `presence` event when they type. Off by default. */
     typingEvents?: boolean;
-    /** Token for `/api/mcp`. Present exactly when MCP access is on for this number. */
-    mcpToken?: string;
+    /** MCP access on: assistants may be approved (via OAuth) to act as this number. */
+    mcp?: boolean;
     /** Meta-style stable numeric id for this number. */
     phoneNumberId: string;
 }
