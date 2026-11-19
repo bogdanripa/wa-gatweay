@@ -86,6 +86,14 @@
       </p>
     </div>
     <div>
+      <h3>Your number, as an MCP server</h3>
+      <p class="muted">
+        Turn on MCP access for a number and Claude can read your chats, search a
+        conversation, reply, react and send photos as you. Chats are fetched live from
+        your phone and never stored here.
+      </p>
+    </div>
+    <div>
       <h3>Survives redeploys</h3>
       <p class="muted">
         Session credentials live in the database, not the container filesystem. Ship a new
@@ -95,10 +103,30 @@
   </div>
 </section>
 
+<section id="mcp">
+  <h2>Use it from Claude</h2>
+  <p>
+    Every number with <strong>MCP access</strong> switched on in the console is a
+    Model Context Protocol server at:
+  </p>
+  <pre><code class="mcp-url">https://wa-gateway.example.com/api/mcp</code></pre>
+  <p class="muted">
+    The console's <em>MCP setup</em> button gives you the token and a ready-to-paste
+    <code>claude mcp add</code> command. That token is separate from the bot token, and
+    turning MCP off revokes it. <a href="/docs.html#mcp">More in the docs.</a>
+  </p>
+</section>
+
 <footer>
   <a href="/docs.html">Docs</a> · <a href="/console.html">Console</a> ·
   <a href="/api/health">Status</a>
 </footer>
 
+<script>
+  // Served from the same host as the API, so the URL is knowable, not a placeholder.
+  document.querySelectorAll('.mcp-url').forEach((n) => {
+    n.textContent = location.origin + '/api/mcp';
+  });
+</script>
 </body>
 </html>

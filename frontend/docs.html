@@ -38,6 +38,11 @@
   </p>
   <pre><code id="base-url">https://wa-gateway.example.com/api</code></pre>
   <p>
+    And for assistants, every number with MCP access on is also an
+    <a href="#mcp">MCP server</a> at:
+  </p>
+  <pre><code class="mcp-url">https://wa-gateway.example.com/api/mcp</code></pre>
+  <p>
     Open the <a href="/console.html">console</a>, add a number, and scan the pairing QR
     with WhatsApp → Settings → Linked devices. The console shows a token for that
     number — that token is how you address it.
@@ -686,7 +691,7 @@
     account</em>. It is meant for linking your own number. It has its own token, shown in
     the console, which is not the bot token:
   </p>
-  <pre><code>claude mcp add --transport http whatsapp https://&lt;host&gt;/api/mcp \
+  <pre><code>claude mcp add --transport http whatsapp <span class="mcp-url">https://wa-gateway.example.com/api/mcp</span> \
   --header 'Authorization: Bearer &lt;MCP token&gt;'</code></pre>
   <p>
     Tools: <code>list_chats</code>, <code>search_contacts</code>, <code>read_chat</code>,
@@ -792,6 +797,9 @@
   // URL is knowable rather than a placeholder someone has to substitute.
   document.querySelectorAll('#base-url').forEach((n) => {
     n.textContent = location.origin + '/api';
+  });
+  document.querySelectorAll('.mcp-url').forEach((n) => {
+    n.textContent = location.origin + '/api/mcp';
   });
 </script>
 </body>

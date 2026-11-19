@@ -449,6 +449,7 @@ let listEl = null;
 function render(payload) {
     $("#api-base").textContent = payload.apiBaseUrl;
     mcpUrl = payload.mcpUrl || "";
+    $("#mcp-url").textContent = mcpUrl;
 
     const numbers = payload.numbers || [];
     const connected = numbers.filter((n) => n.status === "connected").length;
