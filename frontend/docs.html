@@ -708,7 +708,7 @@
     Tools: <code>list_chats</code>, <code>search_contacts</code>, <code>read_chat</code>,
     <code>search_chat</code>, <code>get_media</code>, <code>group_info</code>,
     <code>check_number</code>, <code>send_message</code> (with <code>reply_to</code>),
-    <code>send_media</code>, <code>react</code>, <code>mark_read</code>,
+    <code>send_media</code>, <code>prepare_upload</code>, <code>react</code>, <code>mark_read</code>,
     <code>edit_message</code>, <code>delete_message</code>.
   </p>
   <p class="muted">
@@ -717,6 +717,13 @@
     after answering. The phone has to be online, and it takes a few seconds per 50 messages.
     Only the chat list and people's names are stored. A chat becomes readable once any
     message in it arrives after MCP is turned on.
+  </p>
+  <p class="muted">
+    Files from your computer go through <code>prepare_upload</code>: the assistant gets a
+    one-time link, uploads the file there from your shell, then sends it by
+    <code>upload_id</code>. The file never passes through the model, so a 20 MB video costs
+    the same as a thumbnail. Links last 15 minutes and take up to 64 MB, and every file is
+    deleted once sent or expired. Without a shell (claude.ai), send by public URL.
   </p>
 </section>
 

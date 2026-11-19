@@ -54,15 +54,20 @@ export function buildCloudError(e: CloudRequestError | Error) {
 
 export type CloudSendKind =
     | { type: "text"; body: string; previewUrl: boolean; mentions?: string[] }
-    | { type: "image"; media: string; caption?: string }
-    | { type: "audio"; media: string }
-    | { type: "video"; media: string; caption?: string }
-    | { type: "document"; media: string; caption?: string; filename?: string }
+    // `media` is a string (URL, data: URI or base64) from the Cloud API, or the
+    // bytes themselves from an MCP upload — never a path. `mimetype` is set
+    // only by an upload, which has sniffed it.
+    | { type: "image"; media: MediaInput; caption?: string }
+    | { type: "audio"; media: MediaInput; mimetype?: string }
+    | { type: "video"; media: MediaInput; caption?: string; mimetype?: string }
+    | { type: "document"; media: MediaInput; caption?: string; filename?: string; mimetype?: string }
     | { type: "sticker"; media: string }
     | { type: "reaction"; messageId: string; emoji: string }
     | { type: "location"; latitude: number; longitude: number; name?: string; address?: string }
     | { type: "poll"; name: string; options: string[]; selectableCount: number }
     | { type: "read"; messageId: string; typing: boolean };
+
+export type MediaInput = string | Buffer;
 
 export interface CloudSendRequest {
     to: string;

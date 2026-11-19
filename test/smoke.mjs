@@ -768,7 +768,7 @@ try {
     const toolNames = (listRes?.result?.tools || []).map((t) => t.name);
     const expected = [
         "list_chats", "search_contacts", "read_chat", "search_chat", "get_media", "group_info",
-        "check_number", "send_message", "send_media", "react", "mark_read", "edit_message", "delete_message",
+        "check_number", "send_message", "send_media", "prepare_upload", "react", "mark_read", "edit_message", "delete_message",
     ];
     check(
         "MCP lists every tool",
@@ -791,6 +791,76 @@ try {
         sendRes?.result?.isError === true && /not connected/.test(sendRes?.result?.content?.[0]?.text || ""),
         JSON.stringify(sendRes?.result || sendRes?.error).slice(0, 120)
     );
+
+    // --- uploads: a local file reaches send_media without passing through the model
+
+    const callTool = async (name, args, id = 10) =>
+        (await (await mcpPost(mcpToken, rpc("tools/call", { name, arguments: args }, id))).json().catch(() => null))?.result;
+    const prep = await callTool("prepare_upload", { filename: "pic.png" });
+    const prepText = prep?.content?.[0]?.text || "";
+    const uploadId = /upload_id: (\S+)/.exec(prepText)?.[1];
+    const uploadUrl = /'(http[^']+\/uploads\/[^']+)'/.exec(prepText)?.[1];
+    check(
+        "prepare_upload returns an id and a one-time link on this host",
+        !!uploadId && uploadUrl === `${base}/uploads/${uploadId}`,
+        prepText.slice(0, 120)
+    );
+    const { default: sharp } = await import("sharp");
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#25d366" } }).png().toBuffer();
+    const put = (url, body, type = "application/octet-stream") =>
+        fetch(url, { method: "PUT", headers: { "content-type": type }, body });
+    const up1 = await put(uploadUrl, png);
+    const up1Json = await up1.json().catch(() => null);
+    check(
+        "the file uploads, and its type comes from its bytes",
+        up1.status === 201 && up1Json?.mime_type === "image/png" && up1Json?.bytes === png.length,
+        `status=${up1.status} ${JSON.stringify(up1Json)}`
+    );
+    const up2 = await put(uploadUrl, png);
+    check("an upload link works only once", up2.status === 409, `status=${up2.status}`);
+    const upUnknown = await put(`${base}/uploads/not-a-real-upload-id`, png);
+    check("an unknown upload link is a 404", upUnknown.status === 404, `status=${upUnknown.status}`);
+    const upJson = await fetch(`${base}/uploads/${uploadId}x`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+    });
+    check("a JSON body is refused with a hint, not silently stored", upJson.status === 415, `status=${upJson.status}`);
+
+    const sendUp = await callTool("send_media", { to: "40700000000", upload_id: uploadId });
+    const sendUpAgain = await callTool("send_media", { to: "40700000000", upload_id: uploadId });
+    check(
+        "a send that fails keeps the upload for a retry",
+        /not connected/.test(sendUp?.content?.[0]?.text || "") && /not connected/.test(sendUpAgain?.content?.[0]?.text || ""),
+        `${sendUp?.content?.[0]?.text} | ${sendUpAgain?.content?.[0]?.text}`
+    );
+    const sendBogus = await callTool("send_media", { to: "40700000000", upload_id: "nope" });
+    check(
+        "an unknown upload_id is a clear tool error",
+        sendBogus?.isError && /unknown, expired/.test(sendBogus?.content?.[0]?.text || ""),
+        sendBogus?.content?.[0]?.text
+    );
+    const sendTwo = await callTool("send_media", { to: "40700000000", upload_id: uploadId, url: "https://example.com/a.png" });
+    check("send_media wants exactly one source", sendTwo?.isError && /exactly one/.test(sendTwo?.content?.[0]?.text || ""));
+
+    // Over the per-file cap: cut off while streaming, not buffered first.
+    const bigPrep = (await callTool("prepare_upload", {}, 50))?.content?.[0]?.text || "";
+    const bigUrl = /'(http[^']+\/uploads\/[^']+)'/.exec(bigPrep)?.[1];
+    const tooBig = await put(bigUrl, Buffer.alloc(65 * 1024 * 1024, 1)).catch((e) => ({ status: `error: ${e.cause?.code || e.message}` }));
+    const aliveAfter = await fetch(`${base}/health`);
+    check(
+        "a file over 64 MB is refused, and the server carries on",
+        (tooBig.status === 413 || /EPIPE|ECONNRESET|UND_ERR_SOCKET/.test(String(tooBig.status))) && aliveAfter.status === 200,
+        `upload=${tooBig.status} health=${aliveAfter.status}`
+    );
+
+    // The disk can't be filled by asking: links per number are capped.
+    let capHit = "";
+    for (let i = 0; i < 25 && !capHit; i++) {
+        const r = await callTool("prepare_upload", {}, 100 + i);
+        if (r?.isError) capHit = r.content?.[0]?.text || "";
+    }
+    check("open upload links per number are capped", /already open/.test(capHit), capHit.slice(0, 80));
 
     const mcpBotToken = await mcpPost(tokenA, init);
     const mcpBotTokenJson = await mcpBotToken.json();

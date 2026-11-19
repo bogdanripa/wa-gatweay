@@ -12,6 +12,11 @@ import type { ChatDoc } from "./store.js";
 import type { CloudSendKind } from "./cloud.js";
 import { decodeCursor, describeMessage, encodeCursor } from "./chatlog.js";
 import { isGroupJid, toWaJid } from "./jid.js";
+import { MAX_UPLOAD_BYTES, type UploadStore } from "./uploads.js";
+import { sendKindFor } from "./sniff.js";
+import { fitForModel } from "./imageFit.js";
+
+
 
 /**
  * `/api/mcp`: one WhatsApp number as a Model Context Protocol server, so an
@@ -86,7 +91,7 @@ const chatRef = z
             "Use search_contacts or list_chats to find it."
     );
 
-export function buildMcpServer(session: Session): McpServer {
+export function buildMcpServer(session: Session, uploads: UploadStore): McpServer {
     const server = new McpServer(
         { name: "whatsapp", version: "1.0.0" },
         {
@@ -248,11 +253,12 @@ export function buildMcpServer(session: Session): McpServer {
         },
         async ({ message_id }) => {
             const media = await session.mediaOf(message_id);
-            const base64 = media.data.toString("base64");
             const mime = media.mimetype.split(";")[0];
             if (media.kind === "image" || media.kind === "sticker") {
-                return { content: [{ type: "image", data: base64, mimeType: mime }] };
+                const fit = await fitForModel(media.data, mime);
+                return { content: [{ type: "image", data: fit.data.toString("base64"), mimeType: fit.mime }] };
             }
+            const base64 = media.data.toString("base64");
             if (media.kind === "audio") {
                 return { content: [{ type: "audio", data: base64, mimeType: mime }] };
             }
@@ -343,35 +349,95 @@ export function buildMcpServer(session: Session): McpServer {
     );
 
     tool(
+        "prepare_upload",
+        {
+            title: "Get an upload link for a local file",
+            description:
+                "To send a file from this computer (a photo, PDF, video…), get a one-time upload link, PUT the file " +
+                "there with the curl command this returns, then call send_media with the upload_id. The file goes " +
+                "straight to the gateway and never through you, so size doesn't matter (up to 64 MB). Needs a shell " +
+                "to run curl; without one, send by public URL instead.",
+            inputSchema: {
+                filename: z
+                    .string()
+                    .max(255)
+                    .optional()
+                    .describe("The file's name, e.g. IMG_2041.jpg — helps type detection and is what a document is called."),
+            },
+            annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        },
+        async ({ filename }) => {
+            const u = uploads.create(session.id, filename);
+            const local = filename ? `"${filename.replace(/"/g, "")}"` : "<path to the file>";
+            return text(
+                [
+                    `upload_id: ${u.id}`,
+                    "",
+                    "Upload with:",
+                    `curl -sS --fail-with-body -X PUT -H 'content-type: application/octet-stream' --data-binary @${local} '${u.url}'`,
+                    "",
+                    `Then call send_media with upload_id "${u.id}". The link works once, expires in 15 minutes, and takes up to ${
+                        MAX_UPLOAD_BYTES / 1024 / 1024
+                    } MB. The file is deleted once sent, or when the link expires if it never is.`,
+                ].join("\n")
+            );
+        }
+    );
+
+    tool(
         "send_media",
         {
             title: "Send a photo or file",
             description:
-                "Send a photo (default), video, document or audio as this account. Give `url` (a public https link) " +
-                "or `data` (a data: URI or base64). Optional caption and reply_to.",
+                "Send a photo, video, document or audio as this account. Give exactly one of: `upload_id` (a local " +
+                "file uploaded via prepare_upload — use this for anything on this computer), `url` (a public https " +
+                "link), or `data` (base64 — only for tiny files, since you would have to write out every byte). " +
+                "`type` defaults to what the file is (photos as image). Optional caption and reply_to.",
             inputSchema: {
                 to: chatRef,
-                type: z.enum(["image", "video", "document", "audio"]).default("image"),
+                type: z.enum(["image", "video", "document", "audio"]).optional(),
+                upload_id: z.string().optional().describe("From prepare_upload, after the curl upload succeeded."),
                 url: z.string().url().optional(),
-                data: z.string().optional().describe("data: URI or raw base64, when there is no URL."),
+                data: z.string().optional().describe("data: URI or raw base64 — tiny files only."),
                 caption: z.string().max(4096).optional(),
                 filename: z.string().max(255).optional().describe("For documents: the name the recipient sees."),
                 reply_to: messageId.optional(),
             },
             annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
         },
-        async ({ to, type, url, data, caption, filename, reply_to }) => {
-            const media = url || data;
-            if (!media) return failure("Give either `url` or `data`.");
+        async ({ to, type, upload_id, url, data, caption, filename, reply_to }) => {
+            const given = [upload_id, url, data].filter(Boolean).length;
+            if (given !== 1) return failure("Give exactly one of `upload_id`, `url` or `data`.");
+
+            let media: string | Buffer;
+            let mimetype: string | undefined;
+            let name = filename;
+            if (upload_id) {
+                const state = uploads.status(session.id, upload_id);
+                if (state === "waiting") {
+                    return failure("Nothing has been uploaded to that link yet — run the curl command from prepare_upload first.");
+                }
+                const up = state === "ready" ? await uploads.read(session.id, upload_id) : null;
+                if (!up) return failure("That upload_id is unknown, expired (15 minutes) or already sent. Call prepare_upload again.");
+                media = up.data;
+                mimetype = up.mimetype;
+                name = filename || up.filename;
+            } else {
+                media = (url || data)!;
+            }
+
+            const as = type || (mimetype ? sendKindFor(mimetype) : "image");
             const kind: CloudSendKind =
-                type === "image"
+                as === "image"
                     ? { type: "image", media, caption }
-                    : type === "video"
-                      ? { type: "video", media, caption }
-                      : type === "audio"
-                        ? { type: "audio", media }
-                        : { type: "document", media, caption, filename };
-            return send(to, kind, reply_to);
+                    : as === "video"
+                      ? { type: "video", media, caption, mimetype }
+                      : as === "audio"
+                        ? { type: "audio", media, mimetype }
+                        : { type: "document", media, caption, filename: name, mimetype };
+            const result = await send(to, kind, reply_to);
+            if (upload_id) await uploads.done(session.id, upload_id);
+            return result;
         }
     );
 
@@ -434,7 +500,7 @@ export function buildMcpServer(session: Session): McpServer {
     return server;
 }
 
-export function makeMcpRouter(manager: SessionManager, oauth: OAuthService): Router {
+export function makeMcpRouter(manager: SessionManager, oauth: OAuthService, uploads: UploadStore): Router {
     const router = Router();
 
     const jsonRpcError = (res: Response, status: number, message: string) =>
@@ -479,7 +545,7 @@ export function makeMcpRouter(manager: SessionManager, oauth: OAuthService): Rou
             return;
         }
 
-        const server = buildMcpServer(session);
+        const server = buildMcpServer(session, uploads);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
         res.on("close", () => {
             void transport.close();

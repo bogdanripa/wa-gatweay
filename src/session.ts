@@ -63,8 +63,13 @@ const HISTORY_TYPES_WORTH_SYNCING = new Set<number>([
     proto.HistorySync.HistorySyncType.NON_BLOCKING_DATA,
 ]);
 
-/** The most an MCP `get_media` returns: it travels back as base64 inside a tool result. */
+/**
+ * The most an MCP `get_media` downloads. Non-images go back to the model as
+ * base64, so they stay small; images are shrunk before they go back (see
+ * `fitForModel` in mcp.ts), so a large original is fine to fetch.
+ */
 const MAX_MCP_MEDIA_BYTES = 8_000_000;
+const MAX_MCP_IMAGE_BYTES = 30_000_000;
 
 export type SessionStatus =
     | "starting"
@@ -1422,13 +1427,16 @@ export class Session {
         if (k.type === "location") {
             content = { location: { degreesLatitude: k.latitude, degreesLongitude: k.longitude, name: k.name, address: k.address } };
         } else {
-            const media = k.media.startsWith("http://") || k.media.startsWith("https://")
-                ? { url: k.media }
-                : Buffer.from(k.media.startsWith("data:") ? k.media.split(",")[1] ?? "" : k.media, "base64");
-            if (k.type === "audio") content = { audio: media, mimetype: "audio/mp4" };
-            else if (k.type === "video") content = { video: media, caption: k.caption };
+            const media = toMediaInput(k.media);
+            if (k.type === "audio") content = { audio: media, mimetype: (k as any).mimetype || "audio/mp4" };
+            else if (k.type === "video") content = { video: media, caption: k.caption, ...((k as any).mimetype ? { mimetype: (k as any).mimetype } : {}) };
             else if (k.type === "sticker") content = { sticker: media };
-            else content = { document: media, caption: k.caption, fileName: k.filename || "file", mimetype: documentMime(k.media, k.filename) };
+            else content = {
+                document: media,
+                caption: k.caption,
+                fileName: k.filename || "file",
+                mimetype: k.mimetype || documentMime(typeof k.media === "string" ? k.media : "", k.filename),
+            };
         }
 
         const sent = await sock.sendMessage(jid, content as any, await this.quoteOptions(replyTo));
@@ -1511,7 +1519,7 @@ export class Session {
         return out;
     }
 
-    async sendImage(to: string, media: string, caption?: string, replyTo?: string): Promise<{ id?: string }> {
+    async sendImage(to: string, media: string | Buffer, caption?: string, replyTo?: string): Promise<{ id?: string }> {
         const sock = this.assertReady();
         this.guardRate();
         const jid = toWaJid(to);
@@ -1519,13 +1527,7 @@ export class Session {
 
         // Callers send a data: URI, an http(s) URL, or raw base64 — all three are
         // common enough in the wild that rejecting any of them is a papercut.
-        let image: Buffer | { url: string };
-        if (media.startsWith("http://") || media.startsWith("https://")) {
-            image = { url: media };
-        } else {
-            const base64 = media.startsWith("data:") ? media.split(",")[1] ?? "" : media;
-            image = Buffer.from(base64, "base64");
-        }
+        const image = toMediaInput(media);
 
         const sent = await sock.sendMessage(jid, { image, caption: caption || undefined } as any, await this.quoteOptions(replyTo));
         if (sent) await this.rememberKey(sent);
@@ -2429,8 +2431,9 @@ export class Session {
             (m?.documentMessage && { n: m.documentMessage, kind: "document" });
         if (!node) throw new Error(`message ${messageId} has no media`);
         const size = Number((node.n as any).fileLength || 0);
-        if (size > MAX_MCP_MEDIA_BYTES) {
-            throw new Error(`that ${node.kind} is ${Math.round(size / 1e6)} MB — too large to return (limit ${MAX_MCP_MEDIA_BYTES / 1e6} MB)`);
+        const cap = node.kind === "image" || node.kind === "sticker" ? MAX_MCP_IMAGE_BYTES : MAX_MCP_MEDIA_BYTES;
+        if (size > cap) {
+            throw new Error(`that ${node.kind} is ${Math.round(size / 1e6)} MB — too large to return (limit ${cap / 1e6} MB)`);
         }
         const sock = this.assertReady();
         const data = (await downloadMediaMessage(msg, "buffer", {}, {
@@ -2492,6 +2495,21 @@ export class Session {
             reconnectAttempts: this.reconnectAttempts,
         };
     }
+}
+
+/**
+ * What Baileys gets for a media send: bytes as they are, an http(s) URL for it
+ * to fetch, or decoded base64.
+ *
+ * Never a bare `{ url }` for anything but http(s): Baileys reads any other
+ * `url` as a *local file path*, so passing a caller's string through would let
+ * a client send this container's files. A link that isn't http(s) is decoded as
+ * base64 instead, which at worst produces a broken image.
+ */
+export function toMediaInput(media: string | Buffer): Buffer | { url: string } {
+    if (Buffer.isBuffer(media)) return media;
+    if (media.startsWith("http://") || media.startsWith("https://")) return { url: media };
+    return Buffer.from(media.startsWith("data:") ? media.split(",")[1] ?? "" : media, "base64");
 }
 
 /**
