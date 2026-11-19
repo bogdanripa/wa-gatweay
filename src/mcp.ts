@@ -355,7 +355,8 @@ export function buildMcpServer(session: Session, uploads: UploadStore): McpServe
             description:
                 "To send a file from this computer (a photo, PDF, video…), get a one-time upload link, PUT the file " +
                 "there with the curl command this returns, then call send_media with the upload_id. The file goes " +
-                "straight to the gateway and never through you, so size doesn't matter (up to 64 MB). Needs a shell " +
+                "straight to the gateway and never through you, so size doesn't matter (up to " +
+                `${MAX_UPLOAD_BYTES / 1024 / 1024} MB). Needs a shell ` +
                 "to run curl; without one, send by public URL instead.",
             inputSchema: {
                 filename: z

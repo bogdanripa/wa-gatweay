@@ -32,7 +32,14 @@ import { resolveMime } from "./sniff.js";
  * at once is capped: total bytes on disk, and open links per number.
  */
 
-export const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
+/**
+ * Per file. Set by the deployment, not by WhatsApp: measured against the live
+ * host, bodies up to 52 MB reached the container and 56 MB came back as a 502
+ * from the edge (Cloudflare itself allows 100 MB, so the limit is in the hop
+ * behind it). 48 MB stays clear of it, so an oversized file gets our own clear
+ * 413 instead of an opaque proxy error. Raise it only after re-measuring.
+ */
+export const MAX_UPLOAD_BYTES = 48 * 1024 * 1024;
 /** Everything waiting to be sent, across all numbers, may not exceed this on disk. */
 export const MAX_PENDING_BYTES = 256 * 1024 * 1024;
 /** Open links per number: enough for an album, too few to be a way to fill the disk. */

@@ -849,7 +849,7 @@ try {
     const tooBig = await put(bigUrl, Buffer.alloc(65 * 1024 * 1024, 1)).catch((e) => ({ status: `error: ${e.cause?.code || e.message}` }));
     const aliveAfter = await fetch(`${base}/health`);
     check(
-        "a file over 64 MB is refused, and the server carries on",
+        "a file over the per-file cap is refused, and the server carries on",
         (tooBig.status === 413 || /EPIPE|ECONNRESET|UND_ERR_SOCKET/.test(String(tooBig.status))) && aliveAfter.status === 200,
         `upload=${tooBig.status} health=${aliveAfter.status}`
     );
