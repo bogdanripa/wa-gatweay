@@ -96,6 +96,11 @@
         <span>Typing events</span>
         <small>In 1:1 chats, the bot gets a presence event when someone is typing or recording, so it can wait for them.</small>
       </label>
+      <label class="check">
+        <input name="mcp" type="checkbox">
+        <span>MCP access</span>
+        <small>Lets an assistant (Claude Code / Desktop) read chats and send as this account at /api/mcp, with its own token. Keeps the chat list and contact names, never message text.</small>
+      </label>
       <button type="submit">Add number</button>
     </form>
     <p id="add-error" class="error" hidden></p>
@@ -115,6 +120,22 @@
     <button class="ghost copy" data-copy="#token-value">Copy</button>
     <button id="token-close">Done</button>
   </div>
+</dialog>
+
+<dialog id="mcp-dialog">
+  <h2>MCP access for <span id="mcp-for"></span></h2>
+  <p class="muted">
+    Anyone with this token can read this account's chats and send messages as it.
+    It is separate from the bot token.
+  </p>
+  <p class="muted">Add it to Claude Code:</p>
+  <code id="mcp-command" class="token"></code>
+  <div class="row">
+    <button class="ghost copy" data-copy="#mcp-command">Copy command</button>
+    <button class="ghost copy" data-copy="#mcp-token">Copy token</button>
+    <button id="mcp-close">Done</button>
+  </div>
+  <code id="mcp-token" hidden></code>
 </dialog>
 
 <script src="app.js"></script>

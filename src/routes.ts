@@ -436,6 +436,7 @@ export function makeManagementRouter(manager: SessionManager): Router {
                 // The base URL to give a bot, shown in the console so
                 // nobody has to reconstruct the /api prefix from memory.
                 apiBaseUrl: `${config.publicUrl}${API_PREFIX}`,
+                mcpUrl: `${config.publicUrl}${API_PREFIX}/mcp`,
             });
         } catch (e) {
             fail(res, e);
@@ -466,6 +467,15 @@ export function makeManagementRouter(manager: SessionManager): Router {
         try {
             const doc = await manager.rotateToken(normaliseId(req.params.id));
             res.json({ token: doc.token });
+        } catch (e) {
+            fail(res, e);
+        }
+    });
+
+    router.post("/numbers/:id/rotate-mcp-token", async (req, res) => {
+        try {
+            const doc = await manager.rotateMcpToken(normaliseId(req.params.id));
+            res.json({ mcpToken: doc.mcpToken });
         } catch (e) {
             fail(res, e);
         }

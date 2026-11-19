@@ -6,6 +6,7 @@ import { MediaStore } from "./media.js";
 import { SessionManager } from "./sessions.js";
 import { makeApiRouter, makeGatewayRouter, makeManagementRouter } from "./routes.js";
 import { ConnectionWatcher, TelegramNotifier } from "./alerts.js";
+import { makeMcpRouter } from "./mcp.js";
 
 async function main() {
     // Before anything opens a socket: libsignal starts dumping session state to
@@ -56,6 +57,9 @@ async function main() {
     // no number is paired, which is exactly when you need the console working.
     app.use(API_PREFIX, makeGatewayRouter(manager, media));
     app.use(`${API_PREFIX}/mgmt`, makeManagementRouter(manager));
+    // Before the API router: its `GET /:mediaId` claims every single-segment GET,
+    // and `/mcp` must answer for itself (with a 405) rather than as a media id.
+    app.use(API_PREFIX, makeMcpRouter(manager));
     app.use(API_PREFIX, makeApiRouter(manager));
 
     app.use((_req, res) => res.status(404).json({ error: { message: "not found" } }));

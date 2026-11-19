@@ -30,6 +30,14 @@ export interface SessionDoc {
     /** Send `presence` events (typing / recording / paused) for 1:1 chats. Absent means none. */
     typingEvents?: boolean;
     /**
+     * Bearer token for `/api/mcp`, present exactly when MCP access is on.
+     *
+     * Separate from `token` on purpose: the bot token drives one bot's replies,
+     * this one lets a model read the chat list and act as the account. Turning
+     * MCP off deletes it, which is the revocation.
+     */
+    mcpToken?: string;
+    /**
      * The analogue of Meta's `phone_number_id`: a stable, numeric, per-number
      * id. Minted at creation rather than derived from the linked phone, because
      * clients need it before the number is paired — and because Meta's is
@@ -117,6 +125,55 @@ export interface PollDoc {
     createdAt: Date;
 }
 
+/**
+ * One chat this number has seen activity in — metadata only, for MCP numbers.
+ *
+ * No message text, ever. WhatsApp's servers hold no history and offer no
+ * search, so a linked device has two options: keep its own copy of every
+ * conversation, or ask the phone for history when it is needed. This gateway
+ * does the second (see `Session.fetchHistory`), and what it keeps is only what
+ * that needs: which chats exist, how recently they moved, and one message key
+ * per chat to anchor the phone's history request on.
+ */
+export interface ChatDoc {
+    /** `${sessionId}:${jid}` with the jid as resolved (phone form when known). */
+    _id: string;
+    sessionId: string;
+    /** Resolved jid: `…@s.whatsapp.net` when the LID mapped, `…@g.us` for groups. */
+    jid: string;
+    /**
+     * The jid WhatsApp addressed the chat by — possibly a LID. History requests
+     * name the chat this way, since that is how the phone's own database keys it.
+     */
+    rawJid: string;
+    isGroup: boolean;
+    /** Group subject, or the contact's name as last seen. */
+    name?: string;
+    lastMessageAt: Date;
+    /** Inbound messages since the chat was last read, from this gateway's view or the phone's. */
+    unreadCount: number;
+    /** Newest message's key and time: the anchor `fetchMessageHistory` pages back from. */
+    anchor?: { id: string; fromMe: boolean; participant?: string; remoteJid: string; at: number };
+    updatedAt: Date;
+}
+
+/** Names for a person, for MCP numbers: what the address book and the person themselves call them. */
+export interface ContactDoc {
+    /** `${sessionId}:${digits}` — phone digits when known, else LID digits. */
+    _id: string;
+    sessionId: string;
+    /** Phone-number jid when resolved, else the LID jid. */
+    jid: string;
+    /** LID digits, beside the phone — carried for the same reason as everywhere else. */
+    lid?: string;
+    /** Saved in this account's address book. */
+    name?: string;
+    /** The push name they set themselves. */
+    notify?: string;
+    verifiedName?: string;
+    updatedAt: Date;
+}
+
 /** Downloaded media, served back over HTTP so the bots can fetch it. */
 export interface MediaDoc {
     _id: string;
@@ -134,6 +191,8 @@ export interface Stores {
     messageKeys: Collection<MessageKeyDoc>;
     polls: Collection<PollDoc>;
     media: Collection<MediaDoc>;
+    chats: Collection<ChatDoc>;
+    contacts: Collection<ContactDoc>;
     close: () => Promise<void>;
 }
 
@@ -150,6 +209,8 @@ export async function connectStores(): Promise<Stores> {
     const messageKeys = db.collection<MessageKeyDoc>("message_keys");
     const polls = db.collection<PollDoc>("polls");
     const media = db.collection<MediaDoc>("media");
+    const chats = db.collection<ChatDoc>("chats");
+    const contacts = db.collection<ContactDoc>("contacts");
 
     const index = (p: Promise<unknown>, what: string) =>
         p.catch((e) => logger.warn({ e }, `index: ${what}`));
@@ -185,6 +246,9 @@ export async function connectStores(): Promise<Stores> {
         "media TTL"
     );
     await index(media.createIndex({ sessionId: 1 }), "media sessionId");
+    // The chat list is read newest-first, per number.
+    await index(chats.createIndex({ sessionId: 1, lastMessageAt: -1 }), "chats recency");
+    await index(contacts.createIndex({ sessionId: 1 }), "contacts sessionId");
 
     logger.info({ db: db.databaseName }, "mongo connected");
 
@@ -196,6 +260,8 @@ export async function connectStores(): Promise<Stores> {
         messageKeys,
         polls,
         media,
+        chats,
+        contacts,
         close: () => client.close(),
     };
 }

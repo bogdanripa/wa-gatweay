@@ -163,6 +163,8 @@ async function waitForBoot() {
 }
 
 let child = boot();
+/** Set by the MCP checks, read again after the restart. */
+let mcpToken;
 let tokenA = "";
 let tokenB = "";
 
@@ -550,6 +552,113 @@ try {
         `status=${docBytesUnknown.status}`
     );
 
+    // --- MCP: opt-in, its own token, stateless JSON-RPC ----------------------
+
+    const mcpPost = (token, body) =>
+        fetch(`${base}/mcp`, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                // Streamable HTTP requires a client to accept both.
+                accept: "application/json, text/event-stream",
+                ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(body),
+        });
+    const rpc = (method, params = {}, id = 1) => ({ jsonrpc: "2.0", id, method, params });
+    const init = rpc("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "smoke", version: "0" },
+    });
+
+    const beforeOn = (await (await mgmt("/numbers")).json()).numbers.find((n) => n.id === "alpha-bot");
+    check("MCP access is off by default", beforeOn?.mcpEnabled === false && beforeOn?.mcpToken === null);
+
+    const enable = await (await mgmt("/numbers/alpha-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
+    mcpToken = enable.number?.mcpToken;
+    check("turning MCP on mints a separate token", !!mcpToken && mcpToken.length >= 32 && mcpToken !== tokenA);
+
+    const again = await (await mgmt("/numbers/alpha-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
+    check("re-saving with MCP on keeps the same token", again.number?.mcpToken === mcpToken);
+
+    const mcpNoAuth = await mcpPost(undefined, init);
+    check("MCP rejects a missing token", mcpNoAuth.status === 401, `status=${mcpNoAuth.status}`);
+
+    const mcpBotToken = await mcpPost(tokenA, init);
+    const mcpBotTokenJson = await mcpBotToken.json();
+    check(
+        "MCP rejects the bot token, and says so",
+        mcpBotToken.status === 401 && /bot token/.test(mcpBotTokenJson?.error?.message || ""),
+        `status=${mcpBotToken.status}`
+    );
+
+    const [cloudWithMcp] = await send(mcpToken);
+    check("the MCP token cannot drive the Cloud API", cloudWithMcp.status === 401, `status=${cloudWithMcp.status}`);
+
+    const mgmtWithMcp = await fetch(`${base}/mgmt/numbers`, { headers: { authorization: `Bearer ${mcpToken}` } });
+    check("the MCP token cannot reach the management API", mgmtWithMcp.status === 401, `status=${mgmtWithMcp.status}`);
+
+    const mcpGet = await fetch(`${base}/mcp`, { headers: { authorization: `Bearer ${mcpToken}` } });
+    check("GET /api/mcp is a 405 (stateless), not a media lookup", mcpGet.status === 405, `status=${mcpGet.status}`);
+
+    const initRes = await mcpPost(mcpToken, init);
+    const initJson = await initRes.json().catch(() => null);
+    check(
+        "MCP initialize answers with the server's identity",
+        initRes.status === 200 && initJson?.result?.serverInfo?.name === "whatsapp",
+        `status=${initRes.status}`
+    );
+
+    const listRes = await (await mcpPost(mcpToken, rpc("tools/list", {}, 2))).json().catch(() => null);
+    const toolNames = (listRes?.result?.tools || []).map((t) => t.name);
+    const expected = [
+        "list_chats", "search_contacts", "read_chat", "search_chat", "get_media", "group_info",
+        "check_number", "send_message", "send_media", "react", "mark_read", "edit_message", "delete_message",
+    ];
+    check(
+        "MCP lists every tool",
+        expected.every((n) => toolNames.includes(n)),
+        `missing: ${expected.filter((n) => !toolNames.includes(n)).join(",") || "none"}`
+    );
+
+    const callRes = await (
+        await mcpPost(mcpToken, rpc("tools/call", { name: "list_chats", arguments: {} }, 3))
+    ).json().catch(() => null);
+    check(
+        "list_chats works before pairing, from the index alone",
+        callRes?.result?.content?.[0]?.text === "No chats seen yet.",
+        JSON.stringify(callRes?.result || callRes?.error).slice(0, 120)
+    );
+
+    const sendRes = await (
+        await mcpPost(mcpToken, rpc("tools/call", { name: "send_message", arguments: { to: "40700000000", text: "x" } }, 4))
+    ).json().catch(() => null);
+    check(
+        "an MCP send on an unpaired number is a tool error, not a crash",
+        sendRes?.result?.isError === true && /not connected/.test(sendRes?.result?.content?.[0]?.text || ""),
+        JSON.stringify(sendRes?.result || sendRes?.error).slice(0, 120)
+    );
+
+    const rotatedMcp = await (await mgmt("/numbers/alpha-bot/rotate-mcp-token", { method: "POST" })).json();
+    const oldMcp = await mcpPost(mcpToken, init);
+    const newMcp = await mcpPost(rotatedMcp.mcpToken, init);
+    check(
+        "rotating the MCP token revokes the old one and the new one works",
+        oldMcp.status === 401 && newMcp.status === 200 && rotatedMcp.mcpToken !== mcpToken,
+        `old=${oldMcp.status} new=${newMcp.status}`
+    );
+    mcpToken = rotatedMcp.mcpToken;
+    const [stillBot] = await send(tokenA);
+    check("rotating the MCP token leaves the bot token alone", stillBot.status === 502, `status=${stillBot.status}`);
+
+    // Off revokes; on again mints a fresh one. second-bot proves it, so alpha-bot
+    // keeps its token for the restart check below.
+    const onB = await (await mgmt("/numbers/second-bot", { method: "PATCH", body: JSON.stringify({ mcp: true }) })).json();
+    await mgmt("/numbers/second-bot", { method: "PATCH", body: JSON.stringify({ mcp: false }) });
+    const offB = await mcpPost(onB.number?.mcpToken, init);
+    check("turning MCP off revokes its token", offB.status === 401, `status=${offB.status}`);
+
     check("no webhook fired while unpaired", hits.a === 0 && hits.b === 0, `a=${hits.a} b=${hits.b}`);
 } finally {
     child.kill("SIGTERM");
@@ -575,6 +684,16 @@ try {
         "and their tokens still route after the restart",
         list.numbers.find((n) => n.id === "alpha-bot")?.token === tokenA
     );
+    const mcpAfter = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${mcpToken}`,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    check("the MCP token still works after the restart", mcpAfter.status === 200, `status=${mcpAfter.status}`);
 
     // Deleting must take the credentials with it: a leftover auth document means
     // recreating the id later silently adopts a dead account's device slot.

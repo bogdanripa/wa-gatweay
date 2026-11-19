@@ -14,7 +14,8 @@ import type { Readable } from "node:stream";
 import { Boom } from "@hapi/boom";
 import { config, type SessionConfig } from "./config.js";
 import { logger, baileysLogger } from "./log.js";
-import { scopedId, type Stores } from "./store.js";
+import { scopedId, type ChatDoc, type ContactDoc, type Stores } from "./store.js";
+import { describeMessage, isConversationMessage, matchesQuery, type HistoryAnchor } from "./chatlog.js";
 import { useMongoAuthState } from "./authState.js";
 import { MediaStore } from "./media.js";
 import { WebhookSender } from "./webhook.js";
@@ -61,6 +62,9 @@ const HISTORY_TYPES_WORTH_SYNCING = new Set<number>([
     proto.HistorySync.HistorySyncType.PUSH_NAME,
     proto.HistorySync.HistorySyncType.NON_BLOCKING_DATA,
 ]);
+
+/** The most an MCP `get_media` returns: it travels back as base64 inside a tool result. */
+const MAX_MCP_MEDIA_BYTES = 8_000_000;
 
 export type SessionStatus =
     | "starting"
@@ -157,6 +161,26 @@ export class Session {
     /** Contact names already sent, so unchanged ones are not re-sent. */
     private emittedContacts = new Map<string, string>();
 
+    // ------------------------------------------------------- MCP-only state
+
+    /**
+     * Messages just fetched from the phone for an MCP read, held in memory so
+     * the model can react to, reply to or look at what it just read. Never
+     * written to Mongo — not keeping history is the point (see `ChatDoc`) — and
+     * bounded, so a long session of reading cannot grow the process.
+     */
+    private fetched = new Map<string, WAMessage>();
+    /** The one history request in flight. One at a time, so a reply is never matched to the wrong chat. */
+    private pendingHistory?: {
+        requestId?: string;
+        resolve: (messages: WAMessage[]) => void;
+    };
+    private historyQueue: Promise<unknown> = Promise.resolve();
+    /** Contact names already written, so a burst of identical updates is not a burst of writes. */
+    private writtenContacts = new Map<string, string>();
+    /** Every group this number is in, from one query, refreshed at most every 10 minutes. */
+    private allGroups?: { at: number; groups: GroupMetadata[] };
+
     constructor(
         private cfg: SessionConfig,
         private stores: Stores,
@@ -178,6 +202,15 @@ export class Session {
      * updatable at all: it namespaces the stored credentials, so changing it
      * would orphan them.
      */
+    /** MCP access is on exactly when an MCP token exists. */
+    get mcpEnabled(): boolean {
+        return !!this.cfg.mcpToken;
+    }
+
+    get mcpToken(): string | undefined {
+        return this.cfg.mcpToken;
+    }
+
     applyConfig(cfg: SessionConfig) {
         if (cfg.id !== this.id) throw new Error("a session's id cannot change");
         this.cfg = cfg;
@@ -244,8 +277,14 @@ export class Session {
             // Nothing from a sync can reach a bot regardless: `onMessages` only
             // forwards `type === "notify"`, and history arrives as "append".
             syncFullHistory: false,
+            //
+            // ON_DEMAND is the one exception, and only while an MCP read has
+            // asked the phone for a page of history: that reply is how a chat
+            // gets read without this box keeping a copy of it. Unasked-for
+            // ON_DEMAND data is refused like any other backfill.
             shouldSyncHistoryMessage: (msg: proto.Message.IHistorySyncNotification) =>
-                HISTORY_TYPES_WORTH_SYNCING.has(msg.syncType as number),
+                HISTORY_TYPES_WORTH_SYNCING.has(msg.syncType as number) ||
+                (msg.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND && !!this.pendingHistory),
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: false,
             cachedGroupMetadata: async (jid: string) => this.groupCache.get(jid)?.meta,
@@ -279,7 +318,23 @@ export class Session {
             if (current()) void this.onParticipants(u);
         });
         this.sock.ev.on("contacts.update", (c) => {
-            if (current()) void this.onContacts(c);
+            if (!current()) return;
+            void this.onContacts(c);
+            if (this.mcpEnabled) void this.trackContacts(c);
+        });
+        // The four below feed only the MCP chat list and contact names; a number
+        // without MCP ignores them exactly as it always has.
+        this.sock.ev.on("contacts.upsert", (c) => {
+            if (current() && this.mcpEnabled) void this.trackContacts(c);
+        });
+        this.sock.ev.on("chats.upsert", (c) => {
+            if (current() && this.mcpEnabled) void this.seedChats(c);
+        });
+        this.sock.ev.on("chats.update", (c) => {
+            if (current() && this.mcpEnabled) void this.onChatsUpdate(c);
+        });
+        this.sock.ev.on("messaging-history.set", (h) => {
+            if (current()) void this.onHistorySet(h);
         });
         this.sock.ev.on("call", (calls) => {
             if (current()) void this.onCalls(calls);
@@ -620,6 +675,17 @@ export class Session {
     // ------------------------------------------------------------------ inbound
 
     private async onMessages(upsert: { messages: WAMessage[]; type: string }) {
+        // Before the "notify" filter: the chat list has to move for our own
+        // sends and for messages that arrived while offline, both of which come
+        // as "append". Only metadata is written — see `trackMessage`.
+        if (this.mcpEnabled) {
+            for (const msg of upsert.messages) {
+                await this.trackMessage(msg, upsert.type).catch((e) =>
+                    this.log.warn({ e, id: msg.key?.id }, "could not update the MCP chat index")
+                );
+            }
+        }
+
         // "append" is history backfill; only "notify" is a live message. The bots
         // would happily reply to a week-old message otherwise.
         if (upsert.type !== "notify") return;
@@ -724,7 +790,11 @@ export class Session {
             chatName = meta?.subject;
         }
 
-        const media = cls.mediaKind
+        // Only when there is a webhook to hand the link to. Without one the event
+        // is discarded anyway, and an MCP-only number — a personal account in a
+        // dozen groups — would otherwise fill the Pi's disk with photos nobody
+        // will ever be sent a link to.
+        const media = cls.mediaKind && this.cfg.webhookUrl
             ? await this.media.save(msg, cls.mediaKind, this.sock!, this.id)
             : undefined;
 
@@ -1400,6 +1470,8 @@ export class Session {
             .findOne({ _id: scopedId(this.id, replyTo) })
             .catch(() => null);
         if (!doc) {
+            const fetched = this.fetched.get(replyTo);
+            if (fetched) return { quoted: fetched };
             this.log.warn({ replyTo }, "reply to a message this gateway never saw — sent without a quote");
             return {};
         }
@@ -1645,7 +1717,13 @@ export class Session {
 
     private async recallKey(id: string) {
         const doc = await this.stores.messageKeys.findOne({ _id: scopedId(this.id, id) });
-        if (!doc) return null;
+        if (!doc) {
+            // A message an MCP read just fetched from the phone: known only in memory.
+            const k = this.fetched.get(id)?.key;
+            return k?.id && k.remoteJid
+                ? { id: k.id, remoteJid: k.remoteJid, fromMe: !!k.fromMe, participant: k.participant || undefined }
+                : null;
+        }
         return {
             id: doc.messageId,
             remoteJid: doc.remoteJid,
@@ -1830,6 +1908,548 @@ export class Session {
         };
     }
 
+    // ---------------------------------------------------------------- MCP index
+
+    /**
+     * Keep the chat list current: which chats moved, when, how many unread, and
+     * the newest message's key. No content — the text is never written, and the
+     * key is what lets `readChat` ask the phone for the history instead.
+     */
+    private async trackMessage(msg: WAMessage, type: string) {
+        const key = msg.key as WAMessage["key"] & { remoteJidAlt?: string; participantAlt?: string };
+        const rawJid = key?.remoteJid;
+        if (!rawJid || !key.id) return;
+        // Status updates, channels and broadcast lists are not chats a person
+        // replies in.
+        if (rawJid === "status@broadcast" || rawJid.endsWith("@newsletter") || rawJid.endsWith("@broadcast")) return;
+        const isGroup = isGroupJid(rawJid);
+
+        if (!key.fromMe && msg.pushName) {
+            const sender = isGroup ? key.participant || msg.participant : rawJid;
+            const alt = isGroup ? key.participantAlt : key.remoteJidAlt;
+            if (sender) await this.trackContacts([{ id: sender, phoneNumber: alt || undefined, notify: msg.pushName }]);
+        }
+
+        if (!isConversationMessage(msg.message)) return;
+
+        // Our own sends and offline arrivals come as "append" and never reach
+        // `handleMessage`, which is what remembers keys for live inbound
+        // messages. Without this a model could not react to or quote them.
+        // Not for a history bootstrap: those only seed anchors, and keeping
+        // their bodies would be exactly the backfill this gateway refuses.
+        if (type !== "history" && (key.fromMe || type !== "notify")) await this.rememberKey(msg, true);
+
+        const jid = isGroup ? rawJid : await this.resolveToPn(rawJid, key.remoteJidAlt);
+        const at = Session.sentAt(msg).getTime();
+        const live = !key.fromMe && type === "notify";
+        const name = isGroup ? this.groupCache.get(rawJid)?.meta.subject : !key.fromMe ? msg.pushName || undefined : undefined;
+
+        const $set: Partial<ChatDoc> = {
+            sessionId: this.id,
+            jid,
+            rawJid,
+            isGroup,
+            lastMessageAt: new Date(at),
+            anchor: { id: key.id, fromMe: !!key.fromMe, participant: key.participant || undefined, remoteJid: rawJid, at },
+            updatedAt: new Date(),
+            ...(name ? { name } : {}),
+            // Writing in a chat means having read it — the phone clears it the same way.
+            ...(key.fromMe ? { unreadCount: 0 } : {}),
+        };
+        const update: any = { $set };
+        if (live) update.$inc = { unreadCount: 1 };
+        else if (!key.fromMe) update.$setOnInsert = { unreadCount: 0 };
+
+        try {
+            // Only ever moves forward: an older message (an offline backlog
+            // arriving out of order) must not replace a newer anchor. The filter
+            // fails to match it, the upsert then collides with the existing
+            // _id, and that collision is the "older, ignore" answer.
+            await this.stores.chats.updateOne(
+                {
+                    _id: scopedId(this.id, jid),
+                    $or: [{ lastMessageAt: { $lte: new Date(at) } }, { lastMessageAt: { $exists: false } }],
+                },
+                update,
+                { upsert: true }
+            );
+        } catch (e: any) {
+            if (e?.code !== 11000) throw e;
+        }
+    }
+
+    /** Chats WhatsApp announces (history bootstrap, a new chat): listed even before a message moves them. */
+    private async seedChats(chats: Array<Partial<import("baileys").Chat>>) {
+        for (const c of chats) {
+            if (!c.id || c.id === "status@broadcast" || c.id.endsWith("@newsletter") || c.id.endsWith("@broadcast")) continue;
+            const isGroup = isGroupJid(c.id);
+            const jid = isGroup ? c.id : (await this.quietPn(c.id)) || c.id;
+            const ts = Number(c.conversationTimestamp || 0);
+            await this.stores.chats
+                .updateOne(
+                    { _id: scopedId(this.id, jid) },
+                    {
+                        $setOnInsert: {
+                            sessionId: this.id,
+                            jid,
+                            rawJid: c.id,
+                            isGroup,
+                            lastMessageAt: new Date(ts > 0 ? ts * 1000 : 0),
+                            unreadCount: Math.max(0, Number(c.unreadCount || 0)),
+                            updatedAt: new Date(),
+                        },
+                        ...(c.name ? { $set: { name: c.name } } : {}),
+                    },
+                    { upsert: true }
+                )
+                .catch((e) => this.log.debug({ e, jid }, "could not seed chat"));
+        }
+    }
+
+    /**
+     * Read state from the phone. Only the two values that mean something on
+     * their own are taken: 0 (read there) and negative (marked unread there).
+     * Positive counts are increments Baileys derives from the same messages
+     * `trackMessage` already counted, and adding them would count twice.
+     */
+    private async onChatsUpdate(updates: Array<Partial<import("baileys").Chat>>) {
+        for (const u of updates) {
+            if (!u.id || typeof u.unreadCount !== "number" || u.unreadCount > 0) continue;
+            const jid = isGroupJid(u.id) ? u.id : (await this.quietPn(u.id)) || u.id;
+            await this.stores.chats
+                .updateMany(
+                    { sessionId: this.id, $or: [{ jid }, { rawJid: u.id }] },
+                    u.unreadCount === 0 ? { $set: { unreadCount: 0 } } : { $max: { unreadCount: 1 } }
+                )
+                .catch((e) => this.log.debug({ e }, "could not apply chat read state"));
+        }
+    }
+
+    /**
+     * History sync deliveries. An ON_DEMAND one is the answer to `readChat`,
+     * and goes straight back to it without touching Mongo; the bootstrap kinds
+     * seed the chat list and names on an MCP number.
+     */
+    private async onHistorySet(h: {
+        chats: Array<Partial<import("baileys").Chat>>;
+        contacts: Array<Partial<import("baileys").Contact>>;
+        messages: WAMessage[];
+        syncType?: number | null;
+        peerDataRequestSessionId?: string | null;
+    }) {
+        if (h.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
+            const pending = this.pendingHistory;
+            if (!pending) return;
+            // Matched by request id when WhatsApp echoes it; with one request in
+            // flight at a time, the only pending one is the answer otherwise.
+            if (pending.requestId && h.peerDataRequestSessionId && pending.requestId !== h.peerDataRequestSessionId) return;
+            pending.resolve(h.messages || []);
+            return;
+        }
+        if (!this.mcpEnabled) return;
+        await this.trackContacts(h.contacts || []);
+        await this.seedChats(h.chats || []);
+        // Anchors only: these messages are not stored, but the newest key per
+        // chat is what makes a chat readable before anyone writes in it again.
+        for (const m of h.messages || []) await this.trackMessage(m, "history").catch(() => {});
+    }
+
+    /** LID → phone through the mapping store, without the loud warning `resolveToPn` gives. */
+    private async quietPn(jid: string): Promise<string | undefined> {
+        if (!isLidJid(jid)) return jid;
+        try {
+            return (await this.sock?.signalRepository?.lidMapping?.getPNForLID(jid)) || undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * Names for people: the address-book name, their own push name, and the
+     * business name. Keyed by phone digits where the LID resolves, else by the
+     * LID — both ids are kept, as everywhere else.
+     */
+    private async trackContacts(contacts: Array<Partial<import("baileys").Contact>>) {
+        for (const c of contacts) {
+            if (!c.id || isGroupJid(c.id) || c.id.endsWith("@newsletter") || c.id.endsWith("@broadcast")) continue;
+            const lidJid = c.lid || (isLidJid(c.id) ? c.id : undefined);
+            const pn = c.phoneNumber || (isLidJid(c.id) ? await this.quietPn(c.id) : c.id);
+            const jid = stripDevice(pn && !isLidJid(pn) ? pn : lidJid || c.id);
+            const digits = digitsOf(jid);
+            if (!digits) continue;
+
+            const fields: Partial<ContactDoc> = {
+                ...(c.name ? { name: c.name } : {}),
+                ...(c.notify ? { notify: c.notify } : {}),
+                ...(c.verifiedName ? { verifiedName: c.verifiedName } : {}),
+                ...(lidJid ? { lid: digitsOf(lidJid) } : {}),
+            };
+            const signature = JSON.stringify(fields);
+            if (signature === "{}" || this.writtenContacts.get(digits) === signature) continue;
+            this.writtenContacts.set(digits, signature);
+            if (this.writtenContacts.size > 5000) this.writtenContacts.clear();
+
+            await this.stores.contacts
+                .updateOne(
+                    { _id: scopedId(this.id, digits) },
+                    { $set: { sessionId: this.id, jid, ...fields, updatedAt: new Date() } },
+                    { upsert: true }
+                )
+                .catch((e) => this.log.debug({ e }, "could not store contact"));
+        }
+    }
+
+    // ---------------------------------------------------------------- MCP reads
+
+    private assertMcp() {
+        if (!this.mcpEnabled) throw new Error(`MCP access is off for "${this.id}"`);
+    }
+
+    /** A chat by whatever the caller has: phone digits, a group id, a jid. */
+    private async findChat(input: string): Promise<ChatDoc | null> {
+        const jid = toWaJid(input);
+        if (!jid) return null;
+        return this.stores.chats.findOne({
+            sessionId: this.id,
+            $or: [{ _id: scopedId(this.id, jid) }, { rawJid: jid }],
+        });
+    }
+
+    /** Display name for a 1:1 chat or a contact: address book first, then what they call themselves. */
+    private static nameOf(c?: Partial<ContactDoc> | null): string | undefined {
+        return c?.name || c?.notify || c?.verifiedName || undefined;
+    }
+
+    /** The id a model should pass back: digits for a person, the @g.us id for a group, a raw LID when unresolved. */
+    static chatIdOf(jid: string): string {
+        if (isGroupJid(jid) || isLidJid(jid)) return jid;
+        return digitsOf(jid);
+    }
+
+    async listChats(opts: { limit: number; unreadOnly?: boolean }) {
+        this.assertMcp();
+        const chats = await this.stores.chats
+            .find({ sessionId: this.id, ...(opts.unreadOnly ? { unreadCount: { $gt: 0 } } : {}) })
+            .sort({ lastMessageAt: -1 })
+            .limit(opts.limit)
+            .toArray();
+        const people = await this.stores.contacts
+            .find({ _id: { $in: chats.filter((c) => !c.isGroup).map((c) => scopedId(this.id, digitsOf(c.jid))) } })
+            .toArray();
+        const byId = new Map(people.map((p) => [p._id, p]));
+        const groups = chats.some((c) => c.isGroup && !c.name) ? await this.listGroups().catch(() => []) : [];
+        return chats.map((c) => ({
+            chat_id: Session.chatIdOf(c.jid),
+            name: c.isGroup
+                ? c.name || groups.find((g) => g.id === c.jid)?.subject
+                : Session.nameOf(byId.get(scopedId(this.id, digitsOf(c.jid)))) || c.name,
+            is_group: c.isGroup,
+            last_message_at: c.lastMessageAt.toISOString(),
+            unread: c.unreadCount,
+            last_message_from_me: c.anchor?.fromMe,
+        }));
+    }
+
+    /** Every group this number is in, from one query rather than one per group. */
+    async listGroups(): Promise<GroupMetadata[]> {
+        if (this.allGroups && Date.now() - this.allGroups.at < 10 * 60_000) return this.allGroups.groups;
+        const sock = this.assertReady();
+        const groups = Object.values(await sock.groupFetchAllParticipating());
+        for (const g of groups) this.cacheGroup(g);
+        this.allGroups = { at: Date.now(), groups };
+        return groups;
+    }
+
+    /**
+     * People and groups whose name, push name or number contains the query.
+     * Read from the names this number has been told about — WhatsApp has no
+     * server-side contact search to ask.
+     */
+    async searchContacts(query: string, limit: number) {
+        this.assertMcp();
+        const q = String(query || "").trim();
+        const qDigits = q.replace(/\D/g, "");
+        const byNumber = qDigits.length >= 3 && qDigits.length === q.replace(/[\s+()-]/g, "").length;
+
+        const people = (await this.stores.contacts.find({ sessionId: this.id }).toArray())
+            .filter((c) =>
+                byNumber
+                    ? digitsOf(c.jid).includes(qDigits)
+                    : matchesQuery([c.name, c.notify, c.verifiedName].filter(Boolean).join(" "), q)
+            )
+            .slice(0, limit)
+            .map((c) => ({
+                chat_id: Session.chatIdOf(c.jid),
+                name: Session.nameOf(c),
+                saved_name: c.name,
+                push_name: c.notify,
+                phone: isLidJid(c.jid) ? null : digitsOf(c.jid),
+                lid: c.lid ?? (isLidJid(c.jid) ? digitsOf(c.jid) : null),
+                is_group: false,
+            }));
+
+        const groups = byNumber
+            ? []
+            : (await this.listGroups().catch(() => []))
+                  .filter((g) => matchesQuery(g.subject, q))
+                  .slice(0, limit)
+                  .map((g) => ({ chat_id: g.id, name: g.subject, participants: g.participants?.length, is_group: true }));
+
+        return [...groups, ...people].slice(0, limit);
+    }
+
+    /**
+     * A page of a chat, fetched from the phone and kept nowhere.
+     *
+     * WhatsApp's servers hold no history, so a linked device can only read a
+     * chat by asking the primary phone, which answers with up to `limit`
+     * messages older than a given one. The newest key this gateway has seen in
+     * the chat is that starting point; `before` (a cursor from an earlier page)
+     * pages further back. The phone has to be online for this to answer.
+     */
+    async readChat(chatInput: string, opts: { limit: number; before?: HistoryAnchor }) {
+        this.assertMcp();
+        const chat = await this.findChat(chatInput);
+        if (!chat) {
+            throw new Error(
+                `no activity seen in "${chatInput}" since MCP was turned on. WhatsApp can only page history ` +
+                    `back from a message this device has seen — once anyone writes there, it becomes readable.`
+            );
+        }
+        const anchor = opts.before ?? chat.anchor;
+        if (!anchor) throw new Error(`no message seen in "${chatInput}" yet to read back from`);
+        if (anchor.remoteJid !== chat.rawJid && toWaJid(anchor.remoteJid) !== chat.jid) {
+            throw new Error("that cursor belongs to a different chat");
+        }
+
+        const messages: WAMessage[] = [];
+        // The phone answers with messages *older* than the anchor, so the
+        // newest one has to come from what this gateway already holds.
+        if (!opts.before) {
+            const newest = await this.messageWithBody(anchor.id);
+            // The key store's createdAt is when we saw it, not when it was sent.
+            if (newest) messages.push({ ...newest, messageTimestamp: Math.floor(anchor.at / 1000) } as WAMessage);
+        }
+        const older = await this.requestHistory(anchor, opts.limit);
+        const sameChat = (m: WAMessage) =>
+            m.key?.remoteJid === anchor.remoteJid || toWaJid(m.key?.remoteJid) === chat.jid;
+        for (const m of older) if (sameChat(m) && m.key?.id !== anchor.id) messages.push(m);
+
+        messages.sort((a, b) => Session.sentAt(a).getTime() - Session.sentAt(b).getTime());
+        for (const m of messages) this.keepFetched(m);
+
+        const oldest = older.filter(sameChat).sort((a, b) => Session.sentAt(a).getTime() - Session.sentAt(b).getTime())[0];
+        const next: HistoryAnchor | undefined = oldest?.key?.id
+            ? {
+                  id: oldest.key.id,
+                  fromMe: !!oldest.key.fromMe,
+                  participant: oldest.key.participant || undefined,
+                  remoteJid: oldest.key.remoteJid || anchor.remoteJid,
+                  at: Session.sentAt(oldest).getTime(),
+              }
+            : undefined;
+
+        this.log.info({ chat: chat.isGroup ? chat.jid : "1:1", fetched: older.length, paged: !!opts.before }, "MCP chat read");
+        return { chat, messages, next };
+    }
+
+    /** Names for the senders in a page of messages: our own label, contacts, push names, group roster. */
+    async senderNames(chat: ChatDoc, messages: WAMessage[]): Promise<Map<string, { id: string; name?: string }>> {
+        const out = new Map<string, { id: string; name?: string }>();
+        const ids = new Set<string>();
+        for (const m of messages) {
+            if (m.key?.fromMe) continue;
+            const raw = chat.isGroup ? m.key?.participant || m.participant : m.key?.remoteJid;
+            if (raw) ids.add(raw);
+        }
+        for (const raw of ids) {
+            const pn = isLidJid(raw) ? await this.quietPn(raw) : stripDevice(raw);
+            const jid = pn || raw;
+            const contact =
+                (await this.stores.contacts.findOne({ _id: scopedId(this.id, digitsOf(jid)) })) ||
+                (isLidJid(raw) ? await this.stores.contacts.findOne({ sessionId: this.id, lid: digitsOf(raw) }) : null);
+            const pushed = messages.find((m) => (m.key?.participant || m.key?.remoteJid) === raw && m.pushName)?.pushName;
+            out.set(raw, { id: Session.chatIdOf(contact?.jid || jid), name: Session.nameOf(contact) || pushed || undefined });
+        }
+        return out;
+    }
+
+    /**
+     * Search a chat by paging its history from the phone and matching in
+     * memory. Bounded by `scan` messages: the phone answers 50 at a time, a few
+     * seconds each, so an unbounded search of a busy group would never end.
+     */
+    async searchChat(chatInput: string, query: string, opts: { scan: number; limit: number }) {
+        this.assertMcp();
+        const hits: WAMessage[] = [];
+        let before: HistoryAnchor | undefined;
+        let scanned = 0;
+        let chat: ChatDoc | undefined;
+        while (scanned < opts.scan && hits.length < opts.limit) {
+            const page = await this.readChat(chatInput, { limit: 50, before });
+            chat = page.chat;
+            scanned += page.messages.length;
+            for (const m of [...page.messages].reverse()) {
+                const d = describeMessage(m.message);
+                if (matchesQuery([d.text, d.filename].filter(Boolean).join(" "), query)) hits.push(m);
+                if (hits.length >= opts.limit) break;
+            }
+            if (!page.next || !page.messages.length) {
+                before = undefined;
+                break;
+            }
+            before = page.next;
+        }
+        return { chat: chat!, hits, scanned, more: before };
+    }
+
+    /** Ask the phone for history older than `anchor`, and wait for its answer. One request at a time. */
+    private requestHistory(anchor: HistoryAnchor, count: number): Promise<WAMessage[]> {
+        const run = () =>
+            new Promise<WAMessage[]>((resolve, reject) => {
+                const sock = this.assertReady();
+                const timer = setTimeout(() => {
+                    this.pendingHistory = undefined;
+                    reject(
+                        new Error(
+                            "your phone did not answer the history request within 30s — WhatsApp keeps no history " +
+                                "on its servers, so reading a chat needs the phone online with WhatsApp reachable"
+                        )
+                    );
+                }, 30_000);
+                // Set before sending: the answer is let through by
+                // `shouldSyncHistoryMessage` only while a request is pending.
+                this.pendingHistory = {
+                    resolve: (messages) => {
+                        clearTimeout(timer);
+                        this.pendingHistory = undefined;
+                        resolve(messages);
+                    },
+                };
+                sock.fetchMessageHistory(
+                    Math.max(1, Math.min(50, count)),
+                    { remoteJid: anchor.remoteJid, id: anchor.id, fromMe: anchor.fromMe, participant: anchor.participant },
+                    anchor.at
+                )
+                    .then((requestId) => {
+                        if (this.pendingHistory) this.pendingHistory.requestId = requestId;
+                    })
+                    .catch((e) => {
+                        clearTimeout(timer);
+                        this.pendingHistory = undefined;
+                        reject(e);
+                    });
+            });
+        const result = this.historyQueue.then(run, run);
+        this.historyQueue = result.catch(() => {});
+        return result;
+    }
+
+    private keepFetched(m: WAMessage) {
+        if (!m.key?.id) return;
+        this.fetched.delete(m.key.id);
+        this.fetched.set(m.key.id, m);
+        if (this.fetched.size > 2000) this.fetched.delete(this.fetched.keys().next().value!);
+    }
+
+    /** A message with its content: the in-memory fetch cache, else the week-long key store. */
+    private async messageWithBody(id: string): Promise<WAMessage | null> {
+        const hot = this.fetched.get(id);
+        if (hot) return hot;
+        const doc = await this.stores.messageKeys.findOne({ _id: scopedId(this.id, id) }).catch(() => null);
+        if (!doc?.message) return null;
+        try {
+            return {
+                key: { id: doc.messageId, remoteJid: doc.remoteJid, fromMe: doc.fromMe, participant: doc.participant },
+                message: proto.Message.decode(Buffer.from(doc.message, "base64")),
+                messageTimestamp: Math.floor(doc.createdAt.getTime() / 1000),
+            } as WAMessage;
+        } catch {
+            return null;
+        }
+    }
+
+    // --------------------------------------------------------------- MCP actions
+
+    /** Mark a whole chat read: a read receipt for its newest message, and the phone's unread badge cleared. */
+    async markChatRead(chatInput: string) {
+        this.assertMcp();
+        const sock = this.assertReady();
+        const chat = await this.findChat(chatInput);
+        if (!chat?.anchor) throw new Error(`no message seen in "${chatInput}" to mark read`);
+        const a = chat.anchor;
+        const key = { remoteJid: a.remoteJid, id: a.id, fromMe: a.fromMe, participant: a.participant };
+        if (!a.fromMe) await sock.readMessages([key]);
+        // The receipt turns the sender's ticks blue; this is what clears the
+        // unread badge on the phone and every other linked device.
+        await sock
+            .chatModify({ markRead: true, lastMessages: [{ key, messageTimestamp: Math.floor(a.at / 1000) }] }, a.remoteJid)
+            .catch((e) => this.log.warn({ e }, "read receipt sent, but clearing the unread badge failed"));
+        await this.stores.chats.updateOne({ _id: chat._id }, { $set: { unreadCount: 0 } });
+    }
+
+    async editMessage(messageId: string, text: string): Promise<void> {
+        const sock = this.assertReady();
+        const key = await this.recallKey(messageId);
+        if (!key) throw new Error(`unknown message id: ${messageId}`);
+        if (!key.fromMe) throw new Error("only your own messages can be edited");
+        await sock.sendMessage(key.remoteJid, { text, edit: key as any });
+        this.log.info({ id: messageId }, "message edited");
+    }
+
+    async deleteMessage(messageId: string): Promise<void> {
+        const sock = this.assertReady();
+        const key = await this.recallKey(messageId);
+        if (!key) throw new Error(`unknown message id: ${messageId}`);
+        if (!key.fromMe) throw new Error("only your own messages can be deleted for everyone");
+        await sock.sendMessage(key.remoteJid, { delete: key as any });
+        this.log.info({ id: messageId }, "message deleted for everyone");
+    }
+
+    async checkNumbers(numbers: string[]) {
+        const sock = this.assertReady();
+        const digits = numbers.map((n) => String(n).replace(/\D/g, "")).filter(Boolean);
+        const found = (await sock.onWhatsApp(...digits)) || [];
+        return digits.map((d) => {
+            const hit = found.find((f) => digitsOf(f.jid) === d);
+            return { phone: d, on_whatsapp: !!hit?.exists };
+        });
+    }
+
+    /**
+     * A message's media, downloaded from WhatsApp now and returned, not stored.
+     * Capped: this goes back to a model as base64, and a 100 MB video is not
+     * something it can use.
+     */
+    async mediaOf(messageId: string): Promise<{ data: Buffer; mimetype: string; filename?: string; kind: string }> {
+        const msg = await this.messageWithBody(messageId);
+        if (!msg) throw new Error(`no media known for message ${messageId} — read the chat first, or it is over a week old`);
+        const m = unwrap(msg.message);
+        const node =
+            (m?.imageMessage && { n: m.imageMessage, kind: "image" }) ||
+            (m?.stickerMessage && { n: m.stickerMessage, kind: "sticker" }) ||
+            (m?.videoMessage && { n: m.videoMessage, kind: "video" }) ||
+            (m?.audioMessage && { n: m.audioMessage, kind: "audio" }) ||
+            (m?.documentMessage && { n: m.documentMessage, kind: "document" });
+        if (!node) throw new Error(`message ${messageId} has no media`);
+        const size = Number((node.n as any).fileLength || 0);
+        if (size > MAX_MCP_MEDIA_BYTES) {
+            throw new Error(`that ${node.kind} is ${Math.round(size / 1e6)} MB — too large to return (limit ${MAX_MCP_MEDIA_BYTES / 1e6} MB)`);
+        }
+        const sock = this.assertReady();
+        const data = (await downloadMediaMessage(msg, "buffer", {}, {
+            logger: baileysLogger,
+            reuploadRequest: sock.updateMediaMessage,
+        })) as Buffer;
+        this.log.info({ id: messageId, kind: node.kind, bytes: data.length }, "MCP media fetch");
+        return {
+            data,
+            mimetype: (node.n as any).mimetype || "application/octet-stream",
+            filename: (node.n as any).fileName || undefined,
+            kind: node.kind,
+        };
+    }
+
     // -------------------------------------------------------------------- state
 
     /**
@@ -1862,6 +2482,8 @@ export class Session {
             sendRatePerMinute: this.cfg.sendRatePerMinute ?? null,
             rejectCalls: !!this.cfg.rejectCalls,
             typingEvents: !!this.cfg.typingEvents,
+            mcpEnabled: this.mcpEnabled,
+            mcpToken: this.cfg.mcpToken ?? null,
             me: this.me,
             lastError: this.lastError,
             pairingCode: this.pairingCode,

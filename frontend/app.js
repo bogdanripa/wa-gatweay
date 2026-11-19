@@ -206,19 +206,22 @@ function editForm(n) {
                 sendRatePerMinute: data.get("sendRatePerMinute"),
                 rejectCalls: data.has("rejectCalls"),
                 typingEvents: data.has("typingEvents"),
+                mcp: data.has("mcp"),
             };
             // Only sent when the field was actually rendered. It is hidden for a
             // linked number, and an absent field reads as an empty string —
             // which the API would faithfully store as "cleared".
             if (data.has("pairPhone")) patch.pairPhone = data.get("pairPhone");
             try {
-                await api(`/numbers/${encodeURIComponent(n.id)}`, {
+                const { number } = await api(`/numbers/${encodeURIComponent(n.id)}`, {
                     method: "PATCH",
                     body: JSON.stringify(patch),
                 });
                 editingId = null;
                 await refresh();
-                startPolling();
+                // Just switched on: the token is needed right now to set up the client.
+                if (patch.mcp && !n.mcpEnabled && number?.mcpToken) showMcp(n.id, number.mcpToken);
+                else startPolling();
             } catch (err) {
                 if (err !== LOCKED) alert(err.message);
             }
@@ -274,6 +277,11 @@ function editForm(n) {
             el("input", { name: "typingEvents", type: "checkbox", checked: !!n.typingEvents }),
             el("span", { text: "Typing events" }),
             el("small", { text: "In 1:1 chats, the bot gets a presence event when someone is typing or recording, so it can wait for them." })
+        ),
+        el("label", { class: "check" },
+            el("input", { name: "mcp", type: "checkbox", checked: !!n.mcpEnabled }),
+            el("span", { text: "MCP access" }),
+            el("small", { text: "Lets an assistant read chats and send as this account at /api/mcp, with its own token. Turning it off revokes the token and forgets the chat list and names." })
         ),
         el("div", { class: "row" },
             el("button", { type: "submit", text: "Save" }),
@@ -358,7 +366,32 @@ function actions(n) {
         ),
     });
 
-    return el("div", { class: "row" }, edit, token, rotate, restart, relink, remove);
+    const mcp = n.mcpEnabled
+        ? el("button", {
+            class: "ghost",
+            text: "MCP setup",
+            onclick: () => showMcp(n.id, n.mcpToken),
+        })
+        : null;
+
+    const rotateMcp = n.mcpEnabled
+        ? el("button", {
+            class: "ghost",
+            text: "Rotate MCP token",
+            onclick: (e) => act(
+                e.currentTarget,
+                async () => {
+                    const { mcpToken } = await api(`/numbers/${encodeURIComponent(n.id)}/rotate-mcp-token`, {
+                        method: "POST",
+                    });
+                    showMcp(n.id, mcpToken);
+                },
+                `Rotate ${n.id}'s MCP token?\n\nThe old token stops working immediately — the assistant using it loses access until it is updated.`
+            ),
+        })
+        : null;
+
+    return el("div", { class: "row" }, edit, token, rotate, mcp, rotateMcp, restart, relink, remove);
 }
 
 function card(n) {
@@ -393,6 +426,7 @@ function card(n) {
         kv("Send rate", n.sendRatePerMinute ? `${n.sendRatePerMinute}/min` : "no limit"),
         kv("Calls", n.rejectCalls ? "rejected" : "ring as usual"),
         kv("Typing events", n.typingEvents ? "sent" : "off"),
+        kv("MCP access", n.mcpEnabled ? "on" : "off"),
         n.webhookBacklog ? kv("Webhook backlog", String(n.webhookBacklog)) : null,
         n.reconnectAttempts ? kv("Reconnect attempts", String(n.reconnectAttempts)) : null,
         n.lastError ? kv("Last error", n.lastError) : null,
@@ -414,6 +448,7 @@ let listEl = null;
 
 function render(payload) {
     $("#api-base").textContent = payload.apiBaseUrl;
+    mcpUrl = payload.mcpUrl || "";
 
     const numbers = payload.numbers || [];
     const connected = numbers.filter((n) => n.status === "connected").length;
@@ -466,6 +501,19 @@ function render(payload) {
 
 // --- token dialog ----------------------------------------------------------
 
+/** From the list payload, so the command shows the real public URL and /api prefix. */
+let mcpUrl = "";
+
+function showMcp(id, token) {
+    $("#mcp-for").textContent = id;
+    $("#mcp-token").textContent = token;
+    // Single-quoted for the shell; tokens are base64url, so nothing in them needs escaping.
+    $("#mcp-command").textContent =
+        `claude mcp add --transport http whatsapp-${id} ${mcpUrl} --header 'Authorization: Bearer ${token}'`;
+    stopPolling();
+    $("#mcp-dialog").showModal();
+}
+
 function showToken(id, token) {
     $("#token-for").textContent = id;
     $("#token-value").textContent = token;
@@ -501,7 +549,7 @@ async function refresh() {
  */
 function startPolling() {
     stopPolling();
-    if (!key || $("#console").hidden || editingId || $("#token-dialog").open || document.hidden) {
+    if (!key || $("#console").hidden || editingId || $("#token-dialog").open || $("#mcp-dialog").open || document.hidden) {
         return;
     }
     const pairing = document.querySelector(".pairing") !== null;
@@ -552,6 +600,7 @@ $("#add-form").addEventListener("submit", async (e) => {
                 sendRatePerMinute: data.get("sendRatePerMinute") || undefined,
                 rejectCalls: data.has("rejectCalls"),
                 typingEvents: data.has("typingEvents"),
+                mcp: data.has("mcp"),
             }),
         });
         form.reset();
@@ -559,6 +608,7 @@ $("#add-form").addEventListener("submit", async (e) => {
         // The token is the one thing that can't be recovered from the list at a
         // glance, and it's needed immediately to configure the bot.
         showToken(number.id, number.token);
+        if (number.mcpToken) $("#token-dialog").addEventListener("close", () => showMcp(number.id, number.mcpToken), { once: true });
     } catch (err) {
         if (err !== LOCKED) {
             $("#add-error").textContent = err.message;
@@ -568,6 +618,8 @@ $("#add-form").addEventListener("submit", async (e) => {
 });
 
 $("#token-close").addEventListener("click", () => $("#token-dialog").close());
+$("#mcp-close").addEventListener("click", () => $("#mcp-dialog").close());
+$("#mcp-dialog").addEventListener("close", () => { refresh(); startPolling(); });
 $("#token-dialog").addEventListener("close", () => { refresh(); startPolling(); });
 
 document.addEventListener("click", async (e) => {

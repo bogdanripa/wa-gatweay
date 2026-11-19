@@ -6,6 +6,7 @@ import { Session } from "./session.js";
 import {
     NotFoundError,
     SessionStore,
+    purgeMcpState,
     purgeSessionState,
     toSessionConfig,
     type CreateSessionInput,
@@ -88,6 +89,14 @@ export class SessionManager {
     async update(id: string, patch: UpdateSessionInput): Promise<SessionDoc> {
         const doc = await this.store.update(id, patch);
         this.byId.get(id)?.applyConfig(toSessionConfig(doc));
+        if (!doc.mcpToken) await purgeMcpState(this.stores, id);
+        return doc;
+    }
+
+    async rotateMcpToken(id: string): Promise<SessionDoc> {
+        const doc = await this.store.rotateMcpToken(id);
+        this.byId.get(id)?.applyConfig(toSessionConfig(doc));
+        logger.warn({ session: id }, "MCP token rotated — the MCP client's token must be updated");
         return doc;
     }
 
@@ -162,6 +171,16 @@ export class SessionManager {
 
     byTokenOrNull(token: string): Session | null {
         return this.byToken.get(token) ?? null;
+    }
+
+    /**
+     * The number an MCP token belongs to. Its own lookup, never the bot-token
+     * map: a bot token must not open MCP, and an MCP token must not drive the
+     * Cloud API — they are different grants for different clients.
+     */
+    byMcpTokenOrNull(token: string): Session | null {
+        if (!token) return null;
+        return this.all().find((s) => s.mcpEnabled && s.mcpToken === token) ?? null;
     }
 
     byIdOrNull(id: string): Session | null {

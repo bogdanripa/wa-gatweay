@@ -134,6 +134,7 @@ export function toSessionConfig(doc: SessionDoc): SessionConfig {
         sendRatePerMinute: doc.sendRatePerMinute,
         rejectCalls: !!doc.rejectCalls,
         typingEvents: !!doc.typingEvents,
+        mcpToken: doc.mcpToken,
         phoneNumberId: doc.phoneNumberId,
     };
 }
@@ -145,6 +146,7 @@ export interface CreateSessionInput {
     sendRatePerMinute?: unknown;
     rejectCalls?: unknown;
     typingEvents?: unknown;
+    mcp?: unknown;
 }
 
 export interface UpdateSessionInput {
@@ -153,6 +155,8 @@ export interface UpdateSessionInput {
     sendRatePerMinute?: unknown;
     rejectCalls?: unknown;
     typingEvents?: unknown;
+    /** MCP access on or off. On mints `mcpToken` (kept if already on); off deletes it. */
+    mcp?: unknown;
 }
 
 export class SessionStore {
@@ -190,6 +194,7 @@ export class SessionStore {
             sendRatePerMinute: validateRate(input.sendRatePerMinute),
             ...(validateFlag("rejectCalls", input.rejectCalls) ? { rejectCalls: true } : {}),
             ...(validateFlag("typingEvents", input.typingEvents) ? { typingEvents: true } : {}),
+            ...(validateFlag("mcp", input.mcp) ? { mcpToken: generateToken() } : {}),
             phoneNumberId: generatePhoneNumberId(),
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -241,6 +246,13 @@ export class SessionStore {
             if (validateFlag("typingEvents", patch.typingEvents)) $set.typingEvents = true;
             else $unset.typingEvents = "";
         }
+        if (patch.mcp !== undefined) {
+            // Turning it on again keeps the existing token, so re-saving the form
+            // doesn't silently break a configured client. Off is the revocation.
+            if (validateFlag("mcp", patch.mcp)) {
+                if (!existing.mcpToken) $set.mcpToken = generateToken();
+            } else $unset.mcpToken = "";
+        }
 
         await this.stores.sessions.updateOne(
             { _id: id },
@@ -258,6 +270,15 @@ export class SessionStore {
             { $set: { token, updatedAt: new Date() } }
         );
         return { ...existing, token };
+    }
+
+    async rotateMcpToken(id: string): Promise<SessionDoc> {
+        const existing = await this.get(id);
+        if (!existing) throw new NotFoundError(`no number with id "${id}"`);
+        if (!existing.mcpToken) throw new ValidationError(`MCP access is off for "${id}" — turn it on first`);
+        const mcpToken = generateToken();
+        await this.stores.sessions.updateOne({ _id: id }, { $set: { mcpToken, updatedAt: new Date() } });
+        return { ...existing, mcpToken };
     }
 
     async remove(id: string): Promise<void> {
@@ -280,6 +301,7 @@ export async function purgeSessionState(stores: Stores, sessionId: string): Prom
         stores.authKeys.deleteMany({ _id: { $regex: prefix } }),
         stores.messageKeys.deleteMany({ sessionId }),
         stores.polls.deleteMany({ sessionId }),
+        purgeMcpState(stores, sessionId),
         // Media is deliberately NOT purged here. The row is what tells the hourly
         // sweep which file to unlink, so deleting rows would strand the files on
         // disk forever. The TTL index expires them on the normal schedule, and
@@ -287,3 +309,15 @@ export async function purgeSessionState(stores: Stores, sessionId: string): Prom
     ]);
 }
 
+
+/**
+ * Forget the chat list and names kept for MCP. Called on removal and when MCP
+ * is turned off: the index exists only to serve MCP, so a number that no longer
+ * offers it should not keep a record of who it talks to.
+ */
+export async function purgeMcpState(stores: Stores, sessionId: string): Promise<void> {
+    await Promise.all([
+        stores.chats.deleteMany({ sessionId }),
+        stores.contacts.deleteMany({ sessionId }),
+    ]);
+}

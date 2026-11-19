@@ -138,11 +138,26 @@ And the management API behind the console, all of it requiring `Authorization: B
 |---|---|
 | `GET /api/mgmt/numbers` | every number, with status, QR and token |
 | `POST /api/mgmt/numbers` | add one; returns its generated token |
-| `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap, `rejectCalls`, `typingEvents` |
+| `PATCH /api/mgmt/numbers/:id` | edit webhook URL, pairing phone, rate cap, `rejectCalls`, `typingEvents`, `mcp` |
 | `POST /api/mgmt/numbers/:id/rotate-token` | issue a new bot token, revoking the old |
+| `POST /api/mgmt/numbers/:id/rotate-mcp-token` | issue a new MCP token, revoking the old |
 | `POST /api/mgmt/numbers/:id/relink` | unlink from WhatsApp and show a fresh QR |
 | `POST /api/mgmt/numbers/:id/restart` | bounce the socket, keeping credentials |
 | `DELETE /api/mgmt/numbers/:id` | remove the number and purge its state |
+
+### MCP: a number as an assistant's tool
+
+A number with **MCP access** on (console checkbox, or `PATCH … { "mcp": true }`) is also a [Model Context Protocol](https://modelcontextprotocol.io) server at `POST /api/mcp`, so an assistant can read and write *as that account* — meant for linking your own number, not a bot's. It has its own token, separate from the bot token; neither opens the other's surface, and turning MCP off revokes it.
+
+```bash
+claude mcp add --transport http whatsapp https://<host>/api/mcp --header 'Authorization: Bearer <MCP token>'
+```
+
+Tools: `list_chats`, `search_contacts`, `read_chat`, `search_chat`, `get_media`, `group_info`, `check_number`, `send_message` (with `reply_to`), `send_media`, `react`, `mark_read`, `edit_message`, `delete_message`.
+
+**It keeps no message history.** WhatsApp's servers hold none and offer no search, so `read_chat` and `search_chat` ask the account's *phone* for pages of history (≈50 messages per round trip, a few seconds each), answer, and discard them. The phone has to be online. What is stored is metadata only: the chat list (name, last activity, unread count, and the newest message's key — the anchor a history request pages back from) and people's names. A chat becomes readable once any message in it has been seen after MCP was turned on.
+
+Stateless Streamable HTTP with JSON responses — no session ids, no SSE stream for the edge to buffer.
 
 ---
 

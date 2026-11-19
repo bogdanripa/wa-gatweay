@@ -25,6 +25,7 @@
   <a href="#documents">Documents</a>
   <a href="#status">Status</a>
   <a href="#manage">Managing numbers</a>
+  <a href="#mcp">MCP</a>
   <a href="#differences">Differences from Meta</a>
 </nav>
 
@@ -663,6 +664,7 @@
       <tr><td><code><span class="m">POST</span> /mgmt/numbers</code></td><td><code>{ id, webhookUrl, pairPhone?, sendRatePerMinute? }</code> → its new token</td></tr>
       <tr><td><code><span class="m">PATCH</span> /mgmt/numbers/:id</code></td><td>change webhook URL, pairing phone or rate cap</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/rotate-token</code></td><td>issue a new token, revoking the old one</td></tr>
+      <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/rotate-mcp-token</code></td><td>issue a new MCP token (see below), revoking the old one</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/relink</code></td><td>unlink from WhatsApp and show a fresh QR</td></tr>
       <tr><td><code><span class="m">POST</span> /mgmt/numbers/:id/restart</code></td><td>reconnect without touching credentials</td></tr>
       <tr><td><code><span class="m">DELETE</span> /mgmt/numbers/:id</code></td><td>remove the number and purge its stored state</td></tr>
@@ -674,6 +676,33 @@
   </p>
 </section>
 
+
+<!-- ------------------------------------------------------------------ -->
+<section id="mcp">
+  <h2>MCP</h2>
+  <p>
+    Turn on <strong>MCP access</strong> for a number and it is also a Model Context Protocol
+    server, so an assistant such as Claude Code can read chats and send <em>as that
+    account</em>. It is meant for linking your own number. It has its own token, shown in
+    the console, which is not the bot token:
+  </p>
+  <pre><code>claude mcp add --transport http whatsapp https://&lt;host&gt;/api/mcp \
+  --header 'Authorization: Bearer &lt;MCP token&gt;'</code></pre>
+  <p>
+    Tools: <code>list_chats</code>, <code>search_contacts</code>, <code>read_chat</code>,
+    <code>search_chat</code>, <code>get_media</code>, <code>group_info</code>,
+    <code>check_number</code>, <code>send_message</code> (with <code>reply_to</code>),
+    <code>send_media</code>, <code>react</code>, <code>mark_read</code>,
+    <code>edit_message</code>, <code>delete_message</code>.
+  </p>
+  <p class="muted">
+    No message history is kept. WhatsApp's servers have none and offer no search, so reading
+    or searching a chat asks the account's phone for pages of history and discards them
+    after answering. The phone has to be online, and it takes a few seconds per 50 messages.
+    Only the chat list and people's names are stored. A chat becomes readable once any
+    message in it arrives after MCP is turned on.
+  </p>
+</section>
 
 <!-- ------------------------------------------------------------------ -->
 <section id="differences">
