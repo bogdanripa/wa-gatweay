@@ -28,8 +28,14 @@ ENV NODE_ENV=production
 # curl is not optional. Coolify's container healthcheck shells out to curl (then
 # wget), and the slim image ships neither — without it the container never
 # reports healthy and the deploy is rolled back with nothing obviously wrong.
+#
+# The node binary gets CAP_NET_BIND_SERVICE as a file capability so the process
+# can listen on port 80 while running as the unprivileged `node` user (below).
+# libcap2-bin is only needed for setcap, so it is removed again.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl libcap2-bin \
+    && setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(command -v node)")" \
+    && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps  /app/node_modules ./node_modules
@@ -37,10 +43,15 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 
 # Media is scratch space — TTL'd, re-downloadable, and deliberately not a volume.
-RUN mkdir -p /tmp/wa-media
+# Owned by `node`, the only path the process writes to (uploads live under it too).
+RUN mkdir -p /tmp/wa-media && chown node:node /tmp/wa-media
 
-# Port 80 is privileged, so this runs as root. A `USER node` line here makes the
-# process die at startup with EACCES, which reads like any other failure to boot.
+# Runs as `node`, not root, yet still on port 80: that is what the setcap above is
+# for. Without it, `USER node` makes the process die at startup with EACCES, which
+# reads like any other failure to boot. The container must keep Docker's default
+# CAP_NET_BIND_SERVICE (no `--cap-drop ALL`, no `no-new-privileges`) for this to work;
+# .github/workflows/container-check.yml boots the image to prove it on every change.
+USER node
 ENV PORT=80
 EXPOSE 80
 

@@ -1,0 +1,65 @@
+name: container-check
+
+# Boots the production image the way the platform does and proves two things the
+# Dockerfile relies on: the process is not root, and it still serves port 80
+# (via the node binary's CAP_NET_BIND_SERVICE file capability).
+on:
+  pull_request:
+    paths: [Dockerfile, package.json, package-lock.json, .github/workflows/container-check.yml]
+  push:
+    branches: [main]
+    paths: [Dockerfile, package.json, package-lock.json, .github/workflows/container-check.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t wa-gateway:check .
+
+      - name: Boot with MongoDB
+        run: |
+          docker network create wa
+          docker run -d --name mongo --network wa mongo:7
+          docker run -d --name app --network wa -p 8080:80 \
+            -e WA_MONGO_URL=mongodb://mongo:27017/wa \
+            wa-gateway:check
+
+      - name: Health check answers on port 80
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health; then echo; exit 0; fi
+            sleep 2
+          done
+          docker logs app
+          exit 1
+
+      - name: Docker HEALTHCHECK reports healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' app)
+            [ "$status" = healthy ] && { echo healthy; exit 0; }
+            sleep 2
+          done
+          echo "health status: $status"; docker logs app
+          exit 1
+
+      - name: Process runs as non-root
+        run: |
+          uid=$(docker exec app sh -c "awk '/^Uid:/ {print \$2}' /proc/1/status")
+          echo "PID 1 uid: $uid"
+          [ "$uid" != 0 ]
+          docker exec app sh -c 'touch /tmp/wa-media/.write-check && rm /tmp/wa-media/.write-check'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs app || true
