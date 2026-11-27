@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { open } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import QRCode from "qrcode";
@@ -16,6 +17,19 @@ import {
     parseCloudSendRequest,
 } from "./cloud.js";
 import { toWaJid, toUserId } from "./jid.js";
+import { sniffMime } from "./sniff.js";
+
+const SAFE_MEDIA_MIMES = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "video/mp4",
+    "audio/ogg",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/wav",
+]);
 
 /**
  * The REST surface: WhatsApp Cloud API shaped, and only that.
@@ -318,7 +332,24 @@ export function makeGatewayRouter(manager: SessionManager, media: MediaStore): R
                 res.status(404).end();
                 return;
             }
-            res.setHeader("content-type", doc.mimetype);
+            const head = Buffer.alloc(64);
+            let bytesRead = 0;
+            const fh = await open(doc.path, "r");
+            try {
+                const r = await fh.read(head, 0, head.length, 0);
+                bytesRead = r.bytesRead;
+            } finally {
+                await fh.close();
+            }
+            const sniffed = sniffMime(head.subarray(0, bytesRead));
+            const safeMime = sniffed && SAFE_MEDIA_MIMES.has(sniffed) ? sniffed : "application/octet-stream";
+
+            res.setHeader("content-type", safeMime);
+            res.setHeader("x-content-type-options", "nosniff");
+            res.setHeader("content-security-policy", "default-src 'none'; sandbox");
+            if (safeMime === "application/octet-stream") {
+                res.setHeader("content-disposition", "attachment");
+            }
             res.setHeader("cache-control", "private, max-age=3600");
             createReadStream(doc.path)
                 .on("error", () => res.status(404).end())

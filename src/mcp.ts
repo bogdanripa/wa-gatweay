@@ -369,7 +369,8 @@ export function buildMcpServer(session: Session, uploads: UploadStore): McpServe
         },
         async ({ filename }) => {
             const u = uploads.create(session.id, filename);
-            const local = filename ? `"${filename.replace(/"/g, "")}"` : "<path to the file>";
+            const safeName = filename ? filename.replace(/[\r\n\0]/g, "") : "";
+            const local = safeName ? `'${safeName.replace(/'/g, "'\\''")}'` : "<path to the file>";
             return text(
                 [
                     `upload_id: ${u.id}`,

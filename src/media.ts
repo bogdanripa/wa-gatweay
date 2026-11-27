@@ -7,6 +7,7 @@ import { logger } from "./log.js";
 import type { Stores } from "./store.js";
 import type { MediaKind, ResolvedMedia } from "./map.js";
 import { baileysLogger } from "./log.js";
+import { sniffMime } from "./sniff.js";
 
 const EXT: Record<string, string> = {
     "image/jpeg": "jpg",
@@ -63,8 +64,9 @@ export class MediaStore {
                 waMessage.message?.imageMessage ||
                 waMessage.message?.videoMessage ||
                 waMessage.message?.audioMessage;
-            const mimetype = inner?.mimetype || "application/octet-stream";
-            const ext = EXT[mimetype.split(";")[0]] || "bin";
+            const sniffed = sniffMime(buffer.subarray(0, 64));
+            const mimetype = sniffed && EXT[sniffed] ? sniffed : "application/octet-stream";
+            const ext = EXT[mimetype] || "bin";
 
             const id = `${randomBytes(24).toString("hex")}.${ext}`;
             const path = join(config.mediaDir, id);
